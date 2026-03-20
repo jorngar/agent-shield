@@ -1,9 +1,11 @@
 import asyncio
 import ipaddress
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -12,7 +14,16 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from api_client import BackendClient
-from config import INTERCEPTABLE_PORTS
+from config import (
+    INTERCEPTABLE_PORTS,
+    INTERCEPT_MODE,
+    LOG_FILE,
+    OLLAMA_HOST,
+    PROCESS_SCAN_INTERVAL_SEC,
+    WHITELIST_COMMAND_PATTERNS,
+    WHITELIST_HOSTS,
+    WHITELIST_PORTS,
+)
 from mcp_detector import create_mcp_detector
 from risk_engine import analyze_risk
 
@@ -28,7 +39,10 @@ class MCPInterceptor:
     """
 
     def __init__(
-        self, backend_url: str = "http://localhost:3000", agent_name: str = "codex"
+        self,
+        backend_url: str = "http://localhost:3000",
+        agent_name: str = "codex",
+        verbose: bool = False,
     ):
         self.agent_name = agent_name
         self.session_id = str(uuid.uuid4())
@@ -44,6 +58,16 @@ class MCPInterceptor:
         self._seen_connections: Set[Tuple[int, str, str]] = set()
         self._mcp_target_hosts: Set[str] = set()
         self._mcp_target_ports: Set[int] = set()
+        self._intercept_mode = INTERCEPT_MODE
+        self._verbose = verbose
+        self._log_lock = threading.Lock()
+        self._log_file_path = LOG_FILE or ".agent-shield.log"
+        (
+            self._whitelist_hosts,
+            self._whitelist_ports,
+            self._whitelist_endpoints,
+        ) = self._build_endpoint_whitelist(backend_url=backend_url, ollama_url=OLLAMA_HOST)
+        self._whitelist_command_patterns = set(WHITELIST_COMMAND_PATTERNS)
 
     async def run(self, codex_args: List[str] = None, working_dir: str = ".") -> Dict:
         """
@@ -58,33 +82,40 @@ class MCPInterceptor:
 
         self._running = True
         self._loop = asyncio.get_running_loop()
+        spawn_env = dict(os.environ)
+        if spawn_env.get("TERM", "").strip().lower() == "dumb":
+            spawn_env["TERM"] = "xterm-256color"
 
         try:
             self.process = subprocess.Popen(
                 cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
                 cwd=working_dir,
+                env=spawn_env,
             )
         except FileNotFoundError as exc:
-            print(f"[AgentShield] Failed to start Codex command: {' '.join(cmd)}")
+            self._log(
+                f"Failed to start Codex command: {' '.join(cmd)}",
+                level="ERROR",
+                force_console=True,
+            )
             return await self.report_session(
                 status_override="failed", codex_exit_code=127, error_message=str(exc)
             )
 
-        print(f"[AgentShield] Codex started with PID: {self.process.pid}")
+        self._log(
+            f"Codex started with PID: {self.process.pid}",
+        )
 
-        stdout_thread = threading.Thread(target=self._monitor_stdout, daemon=True)
-        stderr_thread = threading.Thread(target=self._monitor_stderr, daemon=True)
         process_thread = threading.Thread(
             target=self._monitor_process_spawns, daemon=True
         )
 
-        stdout_thread.start()
-        stderr_thread.start()
+        if self.process.stdout is not None:
+            stdout_thread = threading.Thread(target=self._monitor_stdout, daemon=True)
+            stdout_thread.start()
+        if self.process.stderr is not None:
+            stderr_thread = threading.Thread(target=self._monitor_stderr, daemon=True)
+            stderr_thread.start()
         process_thread.start()
 
         exit_code = None
@@ -139,8 +170,8 @@ class MCPInterceptor:
         self._mcp_target_ports = ports
 
         if hosts or ports:
-            print(
-                f"[AgentShield] Loaded MCP targets: hosts={sorted(hosts)} ports={sorted(ports)}"
+            self._log(
+                f"Loaded MCP targets: hosts={sorted(hosts)} ports={sorted(ports)}"
             )
 
     @staticmethod
@@ -191,23 +222,176 @@ class MCPInterceptor:
         walk(servers)
         return hosts, ports
 
+    @classmethod
+    def _host_aliases(cls, host: str) -> Set[str]:
+        normalized = host.strip().lower()
+        aliases = {normalized}
+        if cls._is_local_host(normalized):
+            aliases |= {"localhost", "127.0.0.1", "::1", "0.0.0.0", "::"}
+        return aliases
+
+    def _build_endpoint_whitelist(
+        self, backend_url: str, ollama_url: str
+    ) -> Tuple[Set[str], Set[int], Set[Tuple[str, int]]]:
+        hosts: Set[str] = set(WHITELIST_HOSTS)
+        ports: Set[int] = set(WHITELIST_PORTS)
+        endpoints: Set[Tuple[str, int]] = set()
+
+        for url in [backend_url, ollama_url]:
+            try:
+                parsed = urlparse(url)
+            except ValueError:
+                continue
+            if not parsed.hostname:
+                continue
+
+            port = parsed.port
+            if port is None and parsed.scheme == "http":
+                port = 80
+            if port is None and parsed.scheme == "https":
+                port = 443
+            if port is None:
+                continue
+
+            for alias in self._host_aliases(parsed.hostname):
+                endpoints.add((alias, port))
+
+        return hosts, ports, endpoints
+
+    def _is_whitelisted_endpoint(self, host: str, port: Optional[int]) -> bool:
+        host_aliases = self._host_aliases(host) if host else set()
+        if port is not None and any(
+            (alias, port) in self._whitelist_endpoints for alias in host_aliases
+        ):
+            return True
+        if host_aliases & self._whitelist_hosts:
+            return True
+        if port is not None and port in self._whitelist_ports:
+            return True
+        return False
+
+    def _is_whitelisted_command(self, cmdline: str) -> bool:
+        lowered = cmdline.lower()
+        return any(pattern in lowered for pattern in self._whitelist_command_patterns)
+
+    def _log(self, message: str, level: str = "INFO", force_console: bool = False) -> None:
+        timestamp = datetime.utcnow().isoformat(timespec="seconds")
+        line = f"{timestamp} [{level}] {message}"
+
+        with self._log_lock:
+            try:
+                with open(self._log_file_path, "a", encoding="utf-8") as logfile:
+                    logfile.write(line + "\n")
+            except OSError:
+                pass
+
+        if self._verbose or force_console:
+            print(f"[AgentShield] {message}", file=sys.stderr, flush=True)
+
+    @classmethod
+    def _extract_endpoints_from_text(cls, text: str) -> List[Tuple[str, int]]:
+        endpoints: Set[Tuple[str, int]] = set()
+
+        for match in re.finditer(r"https?://[^\s'\"<>]+", text, re.IGNORECASE):
+            token = match.group(0).strip(".,;")
+            try:
+                parsed = urlparse(token)
+            except ValueError:
+                continue
+            if parsed.hostname and parsed.port is not None:
+                endpoints.add((parsed.hostname.lower(), parsed.port))
+
+        for host, port_str in re.findall(
+            r"\b((?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9_.\-]+):(\d{1,5})\b", text
+        ):
+            try:
+                port = int(port_str)
+            except ValueError:
+                continue
+            if 1 <= port <= 65535:
+                endpoints.add((host.lower(), port))
+
+        return sorted(endpoints)
+
+    def _command_references_mcp_targets(
+        self, cmdline: str
+    ) -> Tuple[bool, str, Optional[Tuple[str, int]]]:
+        for host, port in self._extract_endpoints_from_text(cmdline):
+            if self._is_whitelisted_endpoint(host, port):
+                continue
+            if host in self._mcp_target_hosts:
+                return True, "shell_references_mcp_host", (host, port)
+            if port in self._mcp_target_ports:
+                return True, "shell_references_mcp_port", (host, port)
+            if port in INTERCEPTABLE_PORTS:
+                return True, "shell_references_known_mcp_port", (host, port)
+        return False, "no_mcp_target_reference", None
+
+    def _classify_process_spawn(
+        self, cmdline: str
+    ) -> Tuple[bool, str, str, Dict[str, Any]]:
+        if self._is_whitelisted_command(cmdline):
+            return False, "", "whitelisted_command_pattern", {}
+
+        mcp_info = self.mcp_detector.detect(cmdline)
+        if mcp_info:
+            return (
+                True,
+                "mcp_process_spawn",
+                "mcp_pattern",
+                mcp_info,
+            )
+
+        target_match, reason, endpoint = self._command_references_mcp_targets(cmdline)
+        if target_match:
+            metadata = {
+                "type": "shell_mcp_target_reference",
+                "endpoint": endpoint,
+                "matched_patterns": [reason],
+                "severity": "high",
+            }
+            return (
+                True,
+                "mcp_shell_target_access",
+                reason,
+                metadata,
+            )
+
+        if self._intercept_mode == "strict":
+            return (
+                True,
+                "shell_process_spawn",
+                "strict_mode_all_shell",
+                {
+                    "type": "shell_process",
+                    "matched_patterns": ["strict_mode_all_shell"],
+                    "severity": "medium",
+                },
+            )
+
+        return False, "", "", {}
+
     def _monitor_stdout(self) -> None:
-        if not self.process:
+        if not self.process or self.process.stdout is None:
             return
 
         for line in iter(self.process.stdout.readline, ""):
             if not self._running:
                 break
-            print(f"[Codex] {line}", end="")
+            cleaned = line.rstrip("\n")
+            if cleaned:
+                self._log(f"[Codex stdout] {cleaned}", level="DEBUG")
 
     def _monitor_stderr(self) -> None:
-        if not self.process:
+        if not self.process or self.process.stderr is None:
             return
 
         for line in iter(self.process.stderr.readline, ""):
             if not self._running:
                 break
-            print(f"[Codex] {line}", end="")
+            cleaned = line.rstrip("\n")
+            if cleaned:
+                self._log(f"[Codex stderr] {cleaned}", level="DEBUG")
 
     def _pgrep_children(self, pid: int) -> List[int]:
         try:
@@ -312,9 +496,17 @@ class MCPInterceptor:
         except ValueError:
             return False
 
-    def _is_mcp_connection_candidate(
+    def _classify_connection_candidate(
         self, cmdline: str, remote_host: str, remote_port: str
     ) -> Tuple[bool, str]:
+        try:
+            parsed_port = int(remote_port)
+        except (TypeError, ValueError):
+            parsed_port = None
+
+        if self._is_whitelisted_endpoint(remote_host, parsed_port):
+            return False, "whitelisted_endpoint"
+
         is_mcp_process, _, process_type = self.mcp_detector.scan_content(cmdline)
         if is_mcp_process:
             return True, f"mcp_process:{process_type}"
@@ -322,16 +514,14 @@ class MCPInterceptor:
         if remote_host and remote_host.lower() in self._mcp_target_hosts:
             return True, "configured_mcp_host"
 
-        try:
-            parsed_port = int(remote_port)
-        except (TypeError, ValueError):
-            parsed_port = None
-
         if parsed_port is not None and parsed_port in self._mcp_target_ports:
             return True, "configured_mcp_port"
 
         if parsed_port is not None and parsed_port in INTERCEPTABLE_PORTS:
             return True, "known_mcp_proxy_port"
+
+        if self._intercept_mode == "strict":
+            return True, "strict_mode_all_connections"
 
         return False, "non_mcp_connection"
 
@@ -385,11 +575,20 @@ class MCPInterceptor:
                     if not cmdline:
                         continue
 
-                    mcp_info = self.mcp_detector.detect(cmdline)
-                    if mcp_info:
+                    (
+                        should_intercept,
+                        action_type,
+                        detection_reason,
+                        metadata,
+                    ) = self._classify_process_spawn(cmdline)
+                    if should_intercept:
                         asyncio.run_coroutine_threadsafe(
-                            self._handle_mcp_process_spawn(
-                                pid=pid, cmdline=cmdline, mcp_info=mcp_info
+                            self._handle_process_spawn(
+                                pid=pid,
+                                cmdline=cmdline,
+                                action_type=action_type,
+                                detection_reason=detection_reason,
+                                metadata=metadata,
                             ),
                             self._loop,
                         )
@@ -398,9 +597,9 @@ class MCPInterceptor:
                 self._inspect_connections_for_pids(current)
                 self._seen_pids |= set(new_pids)
             except Exception as exc:
-                print(f"[AgentShield] process monitor error: {exc}")
+                self._log(f"process monitor error: {exc}", level="ERROR")
 
-            time.sleep(0.5)
+            time.sleep(PROCESS_SCAN_INTERVAL_SEC)
 
     def _inspect_connections_for_pids(self, pids: Set[int]) -> None:
         if not self._loop:
@@ -418,7 +617,7 @@ class MCPInterceptor:
                     continue
 
                 self._seen_connections.add(key)
-                is_candidate, reason = self._is_mcp_connection_candidate(
+                is_candidate, reason = self._classify_connection_candidate(
                     cmdline=cmdline,
                     remote_host=conn["remote_host"],
                     remote_port=conn["remote_port"],
@@ -433,20 +632,26 @@ class MCPInterceptor:
                     self._loop,
                 )
 
-    async def _handle_mcp_process_spawn(
-        self, pid: int, cmdline: str, mcp_info: Dict[str, Any]
+    async def _handle_process_spawn(
+        self,
+        pid: int,
+        cmdline: str,
+        action_type: str,
+        detection_reason: str,
+        metadata: Dict[str, Any],
     ) -> None:
-        print(f"\n[AgentShield] MCP process spawn detected (PID: {pid})")
-        print(f"[AgentShield] Command: {cmdline[:200]}...")
+        self._log(f"Process spawn intercepted (PID: {pid})")
+        self._log(f"Command: {cmdline[:200]}...", level="DEBUG")
 
         network_info = await asyncio.to_thread(self._inspect_process_network, pid)
         risk = await asyncio.to_thread(
             analyze_risk,
             self.agent_name,
-            "mcp_process_spawn",
+            action_type,
             cmdline,
             (
-                f"MCP type: {mcp_info.get('type', 'unknown')}; "
+                f"detection_reason={detection_reason}; "
+                f"classification={metadata.get('type', 'unknown')}; "
                 f"listening_ports={network_info.get('listening_ports', [])}; "
                 f"established_connections={network_info.get('established_connections', [])}; "
                 f"listen_raw_preview={network_info.get('listen_raw_preview', [''])[0]}; "
@@ -455,15 +660,15 @@ class MCPInterceptor:
         )
 
         intercept_id, final_decision = await self._submit_intercept_for_decision(
-            action_type="mcp_process_spawn", content=cmdline, risk=risk
+            action_type=action_type, content=cmdline, risk=risk
         )
 
         if final_decision == "deny":
-            print(f"[AgentShield] BLOCKED - {risk.get('summary')}")
+            self._log(f"BLOCKED - {risk.get('summary')}")
             self.blocked_count += 1
             await asyncio.to_thread(self._kill_process_tree, pid)
         else:
-            print("[AgentShield] APPROVED")
+            self._log("APPROVED")
             self.approved_count += 1
 
         self.intercepts.append(
@@ -474,8 +679,10 @@ class MCPInterceptor:
                 "timestamp": datetime.utcnow().isoformat(),
                 "content_preview": cmdline[:100],
                 "process_pid": pid,
-                "process_type": mcp_info.get("type", "unknown"),
+                "process_type": metadata.get("type", "unknown"),
                 "event_type": "process_spawn",
+                "action_type": action_type,
+                "detection_reason": detection_reason,
             }
         )
 
@@ -491,8 +698,8 @@ class MCPInterceptor:
         remote_host = connection.get("remote_host", "")
         connection_scope = "local" if self._is_local_host(remote_host) else "remote"
 
-        print(
-            f"\n[AgentShield] MCP connection detected (PID: {pid}, {connection_scope}): "
+        self._log(
+            f"MCP connection detected (PID: {pid}, {connection_scope}): "
             f"{local_endpoint} -> {remote_endpoint}"
         )
 
@@ -515,11 +722,11 @@ class MCPInterceptor:
         )
 
         if final_decision == "deny":
-            print(f"[AgentShield] BLOCKED connection - {risk.get('summary')}")
+            self._log(f"BLOCKED connection - {risk.get('summary')}")
             self.blocked_count += 1
             await asyncio.to_thread(self._kill_process_tree, pid)
         else:
-            print("[AgentShield] APPROVED connection")
+            self._log("APPROVED connection")
             self.approved_count += 1
 
         self.intercepts.append(
@@ -538,7 +745,7 @@ class MCPInterceptor:
         )
 
     async def _handle_mcp_attempt(self, content: str) -> None:
-        print("\n[AgentShield] MCP HTTP proxy payload detected")
+        self._log("MCP HTTP proxy payload detected")
 
         mcp_info = self.mcp_detector.detect(content) or {"type": "unknown"}
         risk = await asyncio.to_thread(
@@ -647,7 +854,7 @@ class MCPProxyServer:
 
         self.server = socketserver.TCPServer(("", self.port), MCPProxyHandler)
         self._running = True
-        print(f"[AgentShield] MCP Proxy listening on port {self.port}")
+        interceptor._log(f"MCP Proxy listening on port {self.port}", force_console=True)
         await asyncio.to_thread(self.server.serve_forever)
 
     def stop(self) -> None:
@@ -657,6 +864,8 @@ class MCPProxyServer:
 
 
 def create_interceptor(
-    backend_url: str = "http://localhost:3000", agent_name: str = "codex"
+    backend_url: str = "http://localhost:3000",
+    agent_name: str = "codex",
+    verbose: bool = False,
 ) -> MCPInterceptor:
-    return MCPInterceptor(backend_url, agent_name)
+    return MCPInterceptor(backend_url, agent_name, verbose=verbose)

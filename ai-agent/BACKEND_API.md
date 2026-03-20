@@ -1,43 +1,70 @@
-# Backend API Contract
+# Backend API Contract (ai-agent Wrapper)
+
+This document describes the API contract used by the Python wrapper in this directory.
+
+## Endpoints used by wrapper
+
+The wrapper directly calls:
+- `POST /api/intercept`
+- `GET /api/intercept/:intercept_id`
+- `POST /api/session/result`
+
+`/api/session/result` should exist, but wrapper execution does not fail if this call returns an error.
 
 ## POST /api/intercept
 
-Submit an MCP server attempt for approval.
+Submit one intercept event for approval.
 
-**Request:**
+### Request
+
 ```json
 {
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
   "agent": "codex",
-  "action_type": "mcp_server",
-  "content": "npx @modelcontextprotocol/server-filesystem /data",
+  "action_type": "mcp_connection_attempt",
+  "content": "127.0.0.1:54000->127.0.0.1:3001",
   "risk": {
     "risk_level": "high",
     "risk_score": 85,
     "category": "mcp_unauthorized",
-    "summary": "Codex is attempting to connect to unauthorized MCP filesystem server",
+    "summary": "Suspicious MCP-related connection attempt detected.",
     "recommended_action": "deny",
-    "flags": ["filesystem_mcp", "unauthorized_access", "data_exposure_risk"]
+    "flags": ["mcp", "network"],
+    "latency_ms": 420
   }
 }
 ```
 
-**Response:**
+### `action_type` values used by wrapper
+
+- `mcp_process_spawn`: command matches MCP detector patterns
+- `mcp_shell_target_access`: command references configured MCP host/port or known MCP proxy port
+- `shell_process_spawn`: strict-mode shell spawn intercept
+- `mcp_connection_attempt`: network connection intercept
+- `mcp_http_payload`: proxy payload intercept (only if `MCPProxyServer` path is used)
+
+### Success response (2xx)
+
 ```json
 {
   "intercept_id": "550e8400-e29b-41d4-a716-446655440001",
-  "status": "pending",
-  "timestamp": "2024-01-15T10:30:00.000Z"
+  "status": "pending"
 }
 ```
+
+Rules expected by wrapper:
+- `intercept_id` must be present to start decision polling.
+- If response is non-2xx, wrapper treats submission as error and defaults to `deny`.
+- If response is 2xx but `intercept_id` is missing, wrapper also defaults to `deny`.
 
 ---
 
 ## GET /api/intercept/:intercept_id
 
-Poll for decision on an intercept.
+Poll for a decision on an intercept.
 
-**Response (pending):**
+### Pending response example
+
 ```json
 {
   "intercept_id": "550e8400-e29b-41d4-a716-446655440001",
@@ -46,34 +73,8 @@ Poll for decision on an intercept.
 }
 ```
 
-**Response (decided):**
-```json
-{
-  "intercept_id": "550e8400-e29b-41d4-a716-446655440001",
-  "decision": "deny",
-  "status": "decided",
-  "risk": {
-    "risk_level": "high",
-    "risk_score": 85,
-    "category": "mcp_unauthorized"
-  }
-}
-```
+### Decided response example
 
----
-
-## PUT /api/intercept/:intercept_id/decision
-
-Manually set a decision (for admin/dashboard).
-
-**Request:**
-```json
-{
-  "decision": "deny"
-}
-```
-
-**Response:**
 ```json
 {
   "intercept_id": "550e8400-e29b-41d4-a716-446655440001",
@@ -82,13 +83,20 @@ Manually set a decision (for admin/dashboard).
 }
 ```
 
+Rules expected by wrapper:
+- `decision` must be either `"approve"` or `"deny"` to stop polling.
+- Poll cadence: every `0.5s`, up to `60` attempts (~30 seconds).
+- Non-2xx responses and invalid JSON are treated as transient polling failures (continue polling).
+- If polling never yields `approve`/`deny`, wrapper defaults to `deny`.
+
 ---
 
 ## POST /api/session/result
 
-Report final session result.
+Report final wrapper session result.
 
-**Request:**
+### Request
+
 ```json
 {
   "session_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -97,13 +105,24 @@ Report final session result.
     {
       "intercept_id": "550e8400-e29b-41d4-a716-446655440001",
       "decision": "deny",
-      "risk_level": "high"
+      "risk_level": "high",
+      "timestamp": "2026-03-20T10:30:00.000000",
+      "event_type": "network_connection",
+      "content_preview": "127.0.0.1:54000->127.0.0.1:3001",
+      "detection_reason": "configured_mcp_port"
     }
   ]
 }
 ```
 
-**Response:**
+### `status` values
+
+- `success`: Codex exited with code `0` and no denied intercepts
+- `blocked`: at least one deny decision occurred
+- `failed`: startup error or non-zero Codex exit
+
+### Success response (2xx)
+
 ```json
 {
   "ok": true,
@@ -111,64 +130,29 @@ Report final session result.
 }
 ```
 
----
-
-## GET /api/session/:session_id
-
-Get all intercepts for a session.
-
-**Response:**
-```json
-{
-  "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "intercepts": [...],
-  "total": 3
-}
-```
+Notes:
+- Intercept objects can include additional fields such as `event_type`, `action_type`, `process_pid`, `process_type`, `connection_scope`, and `detection_reason`.
+- Wrapper does not retry this endpoint and does not change already-computed session status if this call fails.
 
 ---
 
-## GET /api/intercepts
+## Wrapper failure semantics
 
-List all intercepts (with optional filtering).
+The client behaves fail-closed for intercept decisions:
+- Intercept submission failure (network/HTTP/non-2xx) => deny.
+- Missing `intercept_id` from submit response => deny.
+- Decision polling timeout or unresolved polling failures => deny.
 
-**Query Params:**
-- `status` (optional): "pending" | "decided"
-- `limit` (optional): number (default 50)
-
-**Response:**
-```json
-{
-  "intercepts": [...],
-  "total": 42
-}
-```
+This means backend instability can block MCP-related operations by design.
 
 ---
 
-## GET /api/health
+## Optional endpoints (Dashboard/Admin)
 
-Health check.
+The wrapper does not call these directly, but they are commonly useful:
 
-**Response:**
-```json
-{
-  "status": "ok",
-  "timestamp": "2024-01-15T10:30:00.000Z",
-  "intercepts": 42,
-  "sessions": 10
-}
-```
-
----
-
-## DELETE /api/intercept/:intercept_id
-
-Delete an intercept.
-
-**Response:**
-```json
-{
-  "ok": true
-}
-```
+- `PUT /api/intercept/:intercept_id/decision`
+- `GET /api/session/:session_id`
+- `GET /api/intercepts`
+- `GET /api/health`
+- `DELETE /api/intercept/:intercept_id`

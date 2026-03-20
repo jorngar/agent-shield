@@ -9,6 +9,46 @@ BACKEND_URL = os.getenv("AGENT_SHIELD_BACKEND_URL", "http://localhost:3000")
 CODEX_COMMAND = shlex.split(os.getenv("AGENT_SHIELD_CODEX_COMMAND", "codex"))
 CODEX_ARGS = shlex.split(os.getenv("AGENT_SHIELD_CODEX_ARGS", ""))
 
+INTERCEPT_MODE = os.getenv("AGENT_SHIELD_INTERCEPT_MODE", "mcp-targets").strip().lower()
+if INTERCEPT_MODE not in {"mcp-targets", "strict"}:
+    INTERCEPT_MODE = "mcp-targets"
+
+try:
+    PROCESS_SCAN_INTERVAL_SEC = float(
+        os.getenv("AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC", "0.2")
+    )
+except ValueError:
+    PROCESS_SCAN_INTERVAL_SEC = 0.2
+PROCESS_SCAN_INTERVAL_SEC = max(0.05, PROCESS_SCAN_INTERVAL_SEC)
+
+LOG_FILE = os.getenv("AGENT_SHIELD_LOG_FILE", ".agent-shield.log").strip()
+
+
+def _parse_csv_env(value: str) -> list[str]:
+    parts = []
+    for token in (value or "").split(","):
+        cleaned = token.strip()
+        if cleaned:
+            parts.append(cleaned)
+    return parts
+
+
+WHITELIST_HOSTS = [host.lower() for host in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_HOSTS", ""))]
+
+WHITELIST_PORTS = []
+for token in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_PORTS", "")):
+    try:
+        port_value = int(token)
+    except ValueError:
+        continue
+    if 1 <= port_value <= 65535:
+        WHITELIST_PORTS.append(port_value)
+
+WHITELIST_COMMAND_PATTERNS = [
+    pattern.lower()
+    for pattern in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_COMMAND_PATTERNS", ""))
+]
+
 MCP_PATTERNS = [
     r"@modelcontextprotocol",
     r"server-filesystem",
