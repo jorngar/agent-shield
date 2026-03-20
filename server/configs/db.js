@@ -7,11 +7,28 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT DEFAULT (datetime('now')),
-    tool_name TEXT NOT NULL,
-    tool_args TEXT NOT NULL,
-    summary TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    risk_level TEXT NOT NULL,
+    risk_score INTEGER NOT NULL,
+    risk_category TEXT NOT NULL,
+    risk_summary TEXT NOT NULL,
+    risk_flags TEXT,
+    latency_ms INTEGER,
     verdict TEXT NOT NULL,
     reason TEXT
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    created_at TEXT DEFAULT (datetime('now'))
   )
 `);
 
