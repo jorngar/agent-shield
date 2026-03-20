@@ -1,16 +1,19 @@
-import express from 'express'
-import cors from 'cors'
+require("dotenv").config();
+const express = require("express");
+const interceptRoutes = require("./routes/interceptRoutes");
+const auditRoutes = require("./routes/auditRoutes");
+const healthRoutes = require("./routes/healthRoutes");
 
-const app = express()
-const PORT = process.env.PORT || 4000
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-app.use(cors())
-app.use(express.json())
+app.use(express.json());
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' })
-})
+app.use("/intercept", interceptRoutes);
+app.use("/audit", auditRoutes);
+app.use("/health", healthRoutes);
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
-})
+  console.log(`Server running on port ${PORT}`);
+  console.log(`http://localhost:${PORT}/health`);
+});
