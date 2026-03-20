@@ -1,7 +1,6 @@
 import httpx
-import uuid
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 from config import BACKEND_URL
 
 
@@ -58,9 +57,15 @@ class BackendClient:
                     },
                     timeout=self.timeout,
                 )
-                response.raise_for_status()
+                if response.is_error:
+                    return {
+                        "intercept_id": None,
+                        "status": "error",
+                        "http_status": response.status_code,
+                        "error": response.text[:300],
+                    }
                 return response.json()
-            except httpx.RequestError as e:
+            except httpx.HTTPError as e:
                 return {"intercept_id": None, "status": "error", "error": str(e)}
 
     async def poll_decision(
@@ -83,10 +88,12 @@ class BackendClient:
                         f"{self.base_url}/api/intercept/{intercept_id}",
                         timeout=self.timeout,
                     )
+                    if response.is_error:
+                        continue
                     data = response.json()
                     if data.get("decision") in ("approve", "deny"):
                         return data
-                except httpx.RequestError:
+                except (httpx.HTTPError, ValueError):
                     continue
 
             return {"intercept_id": intercept_id, "decision": "deny", "timeout": True}
@@ -121,9 +128,13 @@ class BackendClient:
                     },
                     timeout=self.timeout,
                 )
-                response.raise_for_status()
+                if response.is_error:
+                    return {
+                        "error": response.text[:300],
+                        "http_status": response.status_code,
+                    }
                 return response.json()
-            except httpx.RequestError as e:
+            except httpx.HTTPError as e:
                 return {"error": str(e)}
 
 
