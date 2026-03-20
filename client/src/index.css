@@ -107,7 +107,7 @@
     --secondary-foreground: oklch(0.880 0.018 221);
 
     --muted:                oklch(0.258 0.050 237);
-    --muted-foreground:     oklch(0.780 0.022 220);   /* clearly readable on dark bg  */
+    --muted-foreground:     oklch(0.880 0.014 220);   /* high base — readable even at low opacity */
 
     --accent:               oklch(0.860 0.110 158);   /* mint — rich, not washed out  */
     --accent-foreground:    oklch(0.115 0.042 238);

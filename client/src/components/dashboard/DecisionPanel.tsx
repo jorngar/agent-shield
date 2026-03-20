@@ -48,7 +48,7 @@ function formatDateTime(iso: string): string {
 function ConsoleLine({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/40">
+      <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/60">
         {label}
       </span>
       <div>{children}</div>
@@ -85,7 +85,7 @@ function EmptyDecision() {
           Select a pending call from the stream to review and approve or deny it.
         </p>
 
-        <div className="mt-4 flex items-center justify-center gap-1.5 font-mono text-[10px] text-muted-foreground/50">
+        <div className="mt-4 flex items-center justify-center gap-1.5 font-mono text-[10px] text-muted-foreground/70">
           <span className="animate-cursor">_</span>
           <span>no call selected</span>
         </div>
@@ -105,7 +105,7 @@ export function DecisionPanel({ intercept, onApprove, onDeny }: DecisionPanelPro
   if (!intercept) return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-4 py-3">
-        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/40">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/60">
           Decision Panel
         </span>
       </div>
@@ -120,7 +120,7 @@ export function DecisionPanel({ intercept, onApprove, onDeny }: DecisionPanelPro
 
       {/* ── Risk level header ──────────────────────────────────────────── */}
       <div className={`border-b animate-slide-up-fade ${riskBorder[riskLevel]} ${riskBg[riskLevel]} px-4 py-4`}>
-        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/50">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/70">
           Risk Level
         </span>
         <div className="mt-2 flex items-center gap-2.5">
@@ -169,7 +169,7 @@ export function DecisionPanel({ intercept, onApprove, onDeny }: DecisionPanelPro
       <div className="shrink-0 border-t border-border">
         {status === "pending" ? (
           <div className="p-4">
-            <p className="mb-3 font-mono text-[10px] text-muted-foreground/40">
+            <p className="mb-3 font-mono text-[10px] text-muted-foreground/60">
               // AWAITING DECISION — {id}
             </p>
             <DecisionButtons

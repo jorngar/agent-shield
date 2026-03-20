@@ -24,7 +24,7 @@ function Section({
       style={{ animationDelay: `${delay}ms`, animationFillMode: "both" }}
     >
       <div className="mb-3 flex items-center gap-3">
-        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/40">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/75">
           {label}
         </span>
         <div className="h-px flex-1 bg-border/30" />
@@ -64,7 +64,7 @@ function EmptyInspector() {
         </p>
 
         {/* Hint */}
-        <div className="mt-4 flex items-center justify-center gap-1.5 font-mono text-[10px] text-muted-foreground/50">
+        <div className="mt-4 flex items-center justify-center gap-1.5 font-mono text-[10px] text-muted-foreground/65">
           <span className="animate-cursor">_</span>
           <span>awaiting selection</span>
         </div>
@@ -82,7 +82,7 @@ export function InspectorPanel({ intercept }: InspectorPanelProps) {
   if (!intercept) return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-5 py-3">
-        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/40">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/75">
           Inspector
         </span>
       </div>
@@ -102,7 +102,7 @@ export function InspectorPanel({ intercept }: InspectorPanelProps) {
       <div className="shrink-0 border-b border-border bg-card px-5 py-4 animate-slide-up-fade">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/40">
+            <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/75">
               Intercepted Call
             </div>
             <div className="mt-1 font-mono text-xl font-bold text-primary">
@@ -111,11 +111,11 @@ export function InspectorPanel({ intercept }: InspectorPanelProps) {
           </div>
           <StatusBadge status={status} />
         </div>
-        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-muted-foreground/50">
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-muted-foreground/70">
           <span>{id}</span>
-          <span className="text-muted-foreground/25">·</span>
+          <span className="text-muted-foreground/35">·</span>
           <span>{category}</span>
-          <span className="text-muted-foreground/25">·</span>
+          <span className="text-muted-foreground/35">·</span>
           <span>{formatDateTime(timestamp)}</span>
         </div>
       </div>
@@ -171,9 +171,9 @@ export function InspectorPanel({ intercept }: InspectorPanelProps) {
             <div className="flex items-center justify-between gap-4">
               <div className="flex items-center gap-2">
                 <StatusBadge status={status} />
-                <span className="font-mono text-xs text-muted-foreground/60">by reviewer</span>
+                <span className="font-mono text-xs text-muted-foreground/75">by reviewer</span>
               </div>
-              <span className="font-mono text-[11px] text-muted-foreground/60">
+              <span className="font-mono text-[11px] text-muted-foreground/75">
                 {formatDateTime(decidedAt)}
               </span>
             </div>

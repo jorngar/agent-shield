@@ -43,10 +43,10 @@ function ErrorBanner({ message, onRetry }: { message: string; onRetry: () => voi
 function EmptyState({ filtered }: { filtered: boolean }) {
   return (
     <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
-      <p className="font-mono text-[11px] text-muted-foreground/30">
+      <p className="font-mono text-[11px] text-muted-foreground/60">
         {filtered ? "// no matches" : "// stream empty"}
       </p>
-      <p className="mt-1 font-mono text-[10px] text-muted-foreground/20">
+      <p className="mt-1 font-mono text-[10px] text-muted-foreground/45">
         {filtered ? "adjust filter" : "awaiting agent activity"}
       </p>
     </div>
@@ -90,7 +90,7 @@ export function InterceptList({
 
       {/* ── Panel header ────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
-        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/50">
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted-foreground/70">
           Intercept Stream
         </span>
         <div className="flex items-center gap-2">
@@ -99,7 +99,7 @@ export function InterceptList({
               {pending} pending
             </span>
           )}
-          <span className="font-mono text-[10px] text-muted-foreground/40">
+          <span className="font-mono text-[10px] text-muted-foreground/55">
             [{filtered.length}]
           </span>
         </div>
@@ -107,19 +107,19 @@ export function InterceptList({
 
       {/* ── Search ──────────────────────────────────────────────────────── */}
       <div className="border-b border-border/60 px-3 py-2">
-        <div className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground/50">
-          <span className="shrink-0 text-primary/60">&gt;</span>
+        <div className="flex items-center gap-1.5 font-mono text-xs text-muted-foreground/70">
+          <span className="shrink-0 text-primary/70">&gt;</span>
           <input
             type="text"
             placeholder="filter…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="flex-1 bg-transparent font-mono text-xs text-foreground placeholder:text-muted-foreground/30 focus:outline-none"
+            className="flex-1 bg-transparent font-mono text-xs text-foreground placeholder:text-muted-foreground/45 focus:outline-none"
           />
           {search && (
             <button
               onClick={() => setSearch("")}
-              className="shrink-0 font-mono text-[10px] text-muted-foreground/40 hover:text-muted-foreground"
+              className="shrink-0 font-mono text-[10px] text-muted-foreground/55 hover:text-muted-foreground"
             >
               ✕
             </button>
@@ -138,7 +138,7 @@ export function InterceptList({
               font-mono text-[10px] uppercase tracking-wider transition-colors
               ${statusFilter === s
                 ? "bg-primary/10 text-primary"
-                : "text-muted-foreground/40 hover:text-muted-foreground"
+                : "text-muted-foreground/55 hover:text-muted-foreground"
               }
             `}
           >
@@ -175,7 +175,7 @@ export function InterceptList({
       {/* ── Footer ──────────────────────────────────────────────────────── */}
       {!isLoading && (
         <div className="border-t border-border/40 px-3 py-1.5">
-          <span className="font-mono text-[10px] text-muted-foreground/30">
+          <span className="font-mono text-[10px] text-muted-foreground/55">
             {filtered.length}/{intercepts.length} events
           </span>
         </div>

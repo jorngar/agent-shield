@@ -62,14 +62,14 @@ export function InterceptCard({ intercept, isSelected, onClick }: InterceptCardP
           <span className="flex-1 truncate font-mono text-xs font-semibold text-foreground">
             {toolName}
           </span>
-          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/40">
+          <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/60">
             {formatLogTime(timestamp)}
           </span>
         </div>
 
         {/* Line 2: category + risk + status */}
         <div className="mt-1 flex items-center gap-2 pl-3.5">
-          <span className="flex-1 truncate font-mono text-[10px] text-muted-foreground/50">
+          <span className="flex-1 truncate font-mono text-[10px] text-muted-foreground/70">
             {category}
           </span>
           <RiskBadge level={riskLevel} compact />

@@ -61,11 +61,11 @@ export function Header({
 
         {/* Breadcrumb */}
         <div className="hidden items-center gap-1.5 font-mono text-xs sm:flex">
-          <span className="text-muted-foreground/30">/</span>
-          <span className="text-muted-foreground/60">intercepts</span>
+          <span className="text-muted-foreground/35">/</span>
+          <span className="text-muted-foreground/75">intercepts</span>
           {selectedToolName && (
             <>
-              <span className="text-muted-foreground/30">/</span>
+              <span className="text-muted-foreground/35">/</span>
               <span className="truncate font-bold text-primary/80">{selectedToolName}</span>
             </>
           )}
@@ -76,7 +76,7 @@ export function Header({
       <div className="flex shrink-0 items-center gap-3 font-mono text-[11px]">
 
         {/* Last synced */}
-        <span className="hidden text-muted-foreground/40 sm:block">
+        <span className="hidden text-muted-foreground/65 sm:block">
           {isLoading ? (
             <span className="animate-pulse">syncing…</span>
           ) : (
@@ -97,7 +97,7 @@ export function Header({
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-risk-low opacity-50" />
             <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-risk-low" />
           </span>
-          <span className="text-muted-foreground/70">live</span>
+          <span className="text-muted-foreground/85">live</span>
         </div>
 
       </div>

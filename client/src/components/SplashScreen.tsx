@@ -146,7 +146,7 @@ export function SplashScreen({ onDone }: SplashScreenProps) {
       {/* ── Bottom tag ──────────────────────────────────────────────────── */}
       <div
         className="animate-splash-sub absolute bottom-8 flex items-center gap-2 font-mono text-[10px] text-muted-foreground/50"
-        style={{ animationDelay: "0.75s" }}
+        style={{ animationDelay: "0.9s" }}
       >
         <span className="h-1 w-1 rounded-full bg-risk-low animate-pulse" />
         <span>v0.1.0 · hackathon build</span>
