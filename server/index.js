@@ -1,5 +1,6 @@
 require("dotenv").config();
 const express = require("express");
+const cors = require("cors");
 // const authenticate = require("./middlewares/authenticate");
 const authRoutes = require("./routes/authRoutes");
 const interceptRoutes = require("./routes/interceptRoutes");
@@ -9,6 +10,7 @@ const healthRoutes = require("./routes/healthRoutes");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(cors());
 app.use(express.json());
 
 // Public routes
