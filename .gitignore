@@ -55,3 +55,13 @@ models/
 *.h5
 *.pth
 *.onnx
+
+# Claude
+.claude/
+.claude/settings.json
+
+# Codex
+.codex/
+
+# Cursor
+.cursor/
