@@ -1,17 +1,11 @@
 {
   "name": "agent-shield-ai",
   "version": "1.0.0",
-  "type": "module",
-  "main": "index.js",
+  "private": true,
   "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js",
-    "lint": "eslint . --ext js,mjs"
+    "start": "python3 cli.py",
+    "dev": "python3 cli.py",
+    "test": "python3 -m unittest discover -s tests -p 'test_*.py'"
   },
-  "dependencies": {
-    "eventsource": "^2.0.2"
-  },
-  "devDependencies": {
-    "eslint": "^8.50.0"
-  }
+  "dependencies": {}
 }
