@@ -1,0 +1,17 @@
+{
+  "name": "agent-shield-ai",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "lint": "eslint . --ext js,mjs"
+  },
+  "dependencies": {
+    "eventsource": "^2.0.2"
+  },
+  "devDependencies": {
+    "eslint": "^8.50.0"
+  }
+}
