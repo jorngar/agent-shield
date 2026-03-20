@@ -25,3 +25,15 @@ exports.intercept = (req, res) => {
 
   res.json({ id: result.lastInsertRowid, verdict, reason });
 };
+
+exports.getStatus = (req, res) => {
+  const { id } = req.params;
+
+  const row = db.prepare("SELECT id, timestamp, tool_name, verdict, reason FROM audit_log WHERE id = ?").get(id);
+
+  if (!row) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  res.json(row);
+};
