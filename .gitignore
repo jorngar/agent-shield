@@ -70,4 +70,4 @@ models/
 .cursor/
 
 #FirebaseKey
-*/firebaseAccountKey.json
+**/firebaseAccountKey.json
