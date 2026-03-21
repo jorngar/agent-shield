@@ -248,6 +248,28 @@ function assertTableName(tableName) {
   }
 }
 
+function buildCreateTableSql(tableName) {
+  assertTableName(tableName);
+
+  return `
+CREATE TABLE IF NOT EXISTS ${tableName} (
+  external_id TEXT PRIMARY KEY,
+  rank INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  category TEXT NOT NULL,
+  criticity TEXT NOT NULL,
+  severity_score INTEGER NOT NULL CHECK (severity_score >= 0 AND severity_score <= 100),
+  summary TEXT NOT NULL,
+  harmful_execution TEXT NOT NULL,
+  exploit_example TEXT NOT NULL,
+  potential_fix TEXT NOT NULL,
+  references_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  source_provider TEXT NOT NULL,
+  research_goal TEXT NOT NULL,
+  collected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);`.trim();
+}
+
 function buildPostgresInsert(findings, options = {}) {
   const tableName = options.tableName || DEFAULT_TABLE_NAME;
   const sourceProvider = options.sourceProvider || "tinyfish";
@@ -297,23 +319,7 @@ function buildPostgresInsert(findings, options = {}) {
     return `(${placeholders.join(", ")})`;
   });
 
-  const createTableSql = `
-CREATE TABLE IF NOT EXISTS ${tableName} (
-  external_id TEXT PRIMARY KEY,
-  rank INTEGER NOT NULL,
-  title TEXT NOT NULL,
-  category TEXT NOT NULL,
-  criticity TEXT NOT NULL,
-  severity_score INTEGER NOT NULL CHECK (severity_score >= 0 AND severity_score <= 100),
-  summary TEXT NOT NULL,
-  harmful_execution TEXT NOT NULL,
-  exploit_example TEXT NOT NULL,
-  potential_fix TEXT NOT NULL,
-  references_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-  source_provider TEXT NOT NULL,
-  research_goal TEXT NOT NULL,
-  collected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);`.trim();
+  const createTableSql = buildCreateTableSql(tableName);
 
   const insertSql = `
 INSERT INTO ${tableName} (${columns.join(", ")})
@@ -521,8 +527,11 @@ async function researchAgentVulnerabilities(options = {}) {
 }
 
 module.exports = {
+  assertTableName,
   DEFAULT_FINDINGS_LIMIT,
   DEFAULT_RESEARCH_GOAL,
+  DEFAULT_TABLE_NAME,
+  buildCreateTableSql,
   buildPostgresInsert,
   buildTinyfishGoal,
   normalizeFindings,

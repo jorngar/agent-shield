@@ -6,6 +6,7 @@ process.env.AGENT_SHIELD_DB_PATH = ":memory:";
 process.env.TINYFISH_API_KEY = "test-api-key";
 
 const { createApp } = require("../app");
+const vulnerabilityIntelService = require("../services/vulnerabilityIntelService");
 
 async function withServer(run) {
   const app = createApp();
@@ -97,60 +98,72 @@ test("session results are stored with wrapper-compatible response shape", async 
   });
 });
 
-test("Tinyfish research endpoint returns normalized findings and parameterized postgres SQL", async () => {
-  const originalFetch = global.fetch;
+test("cached vulnerability intel route reads stored findings without invoking Tinyfish", async () => {
+  const originalGetStored = vulnerabilityIntelService.getStoredAgentVulnerabilities;
 
-  global.fetch = async (url, options) => {
-    if (String(url).startsWith("http://127.0.0.1:")) {
-      return originalFetch(url, options);
-    }
-
-    assert.equal(url, "https://agent.tinyfish.ai/v1/automation/run-sse");
-    assert.equal(options.headers["X-API-Key"], "test-api-key");
-
-    return new Response(
-      [
-        'event: message',
-        'data: {"type":"PROGRESS","status":"RUNNING"}',
-        "",
-        'event: message',
-        'data: {"type":"COMPLETE","status":"COMPLETED","result":{"findings":[{"title":"Prompt injection to tool execution","category":"prompt-injection","criticity":"critical","severity_score":98,"summary":"Untrusted content can coerce tool use.","harmful_execution":"Agent follows injected instructions and triggers sensitive tools.","exploit_example":"A web page hides tool-invocation instructions in scraped text.","potential_fix":"Isolate tool plans, require allowlists, and strip untrusted instructions before tool use.","references":[{"title":"OWASP LLM Top 10","url":"https://owasp.org/www-project-top-10-for-large-language-model-applications/"}]},{"title":"Unscoped filesystem MCP access","category":"mcp","criticity":"high","severity_score":88,"summary":"Over-broad filesystem access enables destructive writes.","harmful_execution":"Agent writes or deletes files outside the approved workspace.","exploit_example":"A shell-based MCP wrapper writes startup scripts into user home directories.","potential_fix":"Constrain writable roots and enforce per-tool path policies.","references":[{"title":"Model Context Protocol","url":"https://modelcontextprotocol.io/"}]}]}}',
-        "",
-      ].join("\n"),
+  vulnerabilityIntelService.getStoredAgentVulnerabilities = async () => ({
+    table_name: "agent_vulnerability_intel",
+    total_findings: 2,
+    last_refreshed_at: "2026-03-21T01:00:00.000Z",
+    findings: [
       {
-        status: 200,
-        headers: { "Content-Type": "text/event-stream" },
+        external_id: "prompt-injection-1",
+        rank: 1,
+        title: "Prompt injection",
+        category: "prompt-injection",
+        criticity: "critical",
+        severity_score: 99,
+        summary: "Summary",
+        harmful_execution: "Impact",
+        exploit_example: "Example",
+        potential_fix: "Fix",
+        references: [{ title: "OWASP", url: "https://owasp.org/" }],
       },
-    );
-  };
+    ],
+  });
 
   try {
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/research/agent-vulnerabilities`, {
+      const response = await fetch(`${baseUrl}/api/research/agent-vulnerabilities?limit=5`);
+      assert.equal(response.status, 200);
+
+      const body = await response.json();
+      assert.equal(body.table_name, "agent_vulnerability_intel");
+      assert.equal(body.total_findings, 2);
+      assert.equal(body.findings[0].title, "Prompt injection");
+    });
+  } finally {
+    vulnerabilityIntelService.getStoredAgentVulnerabilities = originalGetStored;
+  }
+});
+
+test("manual vulnerability refresh route can be triggered explicitly", async () => {
+  const originalRefresh = vulnerabilityIntelService.refreshStoredAgentVulnerabilities;
+
+  vulnerabilityIntelService.refreshStoredAgentVulnerabilities = async () => ({
+    provider: "tinyfish",
+    table_name: "agent_vulnerability_intel",
+    findings_count: 100,
+    last_refreshed_at: "2026-03-21T01:00:00.000Z",
+    source_url: "https://www.google.com/",
+    goal: "research prompt",
+  });
+
+  try {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/research/agent-vulnerabilities/refresh`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: "https://www.google.com/",
-          limit: 2,
-          table_name: "agent_vulnerability_intel",
-        }),
+        body: JSON.stringify({ limit: 100 }),
       });
 
       assert.equal(response.status, 200);
       const body = await response.json();
-
       assert.equal(body.provider, "tinyfish");
-      assert.equal(body.findings_count, 2);
-      assert.equal(body.findings[0].rank, 1);
-      assert.equal(body.findings[0].title, "Prompt injection to tool execution");
-      assert.equal(body.postgres.table_name, "agent_vulnerability_intel");
-      assert.match(body.postgres.create_table_sql, /CREATE TABLE IF NOT EXISTS agent_vulnerability_intel/);
-      assert.match(body.postgres.insert_sql, /INSERT INTO agent_vulnerability_intel/);
-      assert.match(body.postgres.insert_sql, /\$1/);
-      assert.equal(body.postgres.row_count, 2);
-      assert.equal(body.postgres.insert_params.length, 28);
+      assert.equal(body.findings_count, 100);
+      assert.equal(body.table_name, "agent_vulnerability_intel");
     });
   } finally {
-    global.fetch = originalFetch;
+    vulnerabilityIntelService.refreshStoredAgentVulnerabilities = originalRefresh;
   }
 });

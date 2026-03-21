@@ -5,6 +5,7 @@ This CDK app deploys the AWS backend for Agent Shield with:
 - VPC Link to an internal ALB
 - private EC2 backend (Node.js/Express)
 - private RDS Postgres
+- a systemd timer that refreshes Tinyfish vulnerability intel every 2 days
 
 The local `ai-agent` wrapper (running with local Ollama) calls this backend for second-stage validation and policy/knowledge checks.
 
@@ -30,6 +31,7 @@ The backend EC2 instance needs:
 - `GitHubRepo`: `owner/repo`
 - `GitHubTokenSecretArn`: Secrets Manager secret ARN containing a GitHub token (`SecretString` should be the token)
 - `FirebaseServiceAccountSecretArn`: Secrets Manager secret ARN containing the Firebase service account JSON (`SecretString` should be the JSON)
+- `TinyfishApiKeySecretArn`: Secrets Manager secret ARN containing the Tinyfish API key (`SecretString` should be the raw key)
 - `BedrockFoundationModelArn`: the Bedrock foundation model ARN to allow for `bedrock:InvokeModel`
 
 ## Current stack (what it provisions)
@@ -40,6 +42,7 @@ Flat summary:
 - Internal Application Load Balancer (ALB) + health check at `/api/health`
 - API Gateway HTTP API with VPC Link private integration to ALB
 - RDS Postgres + Secrets Manager secret for database password
+- systemd timer/service on the backend host for scheduled vulnerability refresh
 
 ## Runtime note
 

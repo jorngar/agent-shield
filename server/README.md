@@ -16,6 +16,11 @@ From repo root:
 - `TINYFISH_API_KEY` (required for Tinyfish research route)
 - `TINYFISH_RESEARCH_URL` (optional, default `https://www.google.com/`)
 - `TINYFISH_BROWSER_PROFILE` (`lite` or `stealth`, default `lite`)
+- `TINYFISH_RESEARCH_GOAL` (optional override for the default vulnerability research prompt)
+- `VULNERABILITY_REFRESH_LIMIT` (optional, default `100`)
+- `VULNERABILITY_INTEL_TABLE` (optional, default `agent_vulnerability_intel`)
+- `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USERNAME`, `DATABASE_PASSWORD` (required for stored vulnerability intel in Postgres)
+- `DATABASE_SSL` (optional, set to `require` if your Postgres endpoint requires TLS)
 - `AGENT_SHIELD_DB_PATH` (optional SQLite path, useful for tests)
 
 Example:
@@ -33,7 +38,9 @@ Health check:
 - `GET /api/health`
 
 Tinyfish research:
-- `POST /api/research/agent-vulnerabilities`
+- `GET /api/research/agent-vulnerabilities`
+- `POST /api/research/agent-vulnerabilities` (compatibility alias for cached reads)
+- `POST /api/research/agent-vulnerabilities/refresh` (manual refresh)
 
 Example request:
 
@@ -46,8 +53,7 @@ Example request:
 }
 ```
 
-The research route returns:
-- normalized findings
-- a PostgreSQL `CREATE TABLE IF NOT EXISTS`
-- a parameterized `INSERT ... ON CONFLICT DO UPDATE`
-- the matching `insert_params` array
+Runtime behavior:
+- API reads serve cached findings from Postgres.
+- Tinyfish refresh is intended to run out-of-band on a schedule, not per request.
+- A manual refresh endpoint exists for ops/admin use.

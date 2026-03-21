@@ -36,6 +36,8 @@ describe('AgentShieldStack', () => {
     expect(renderedTemplate).toContain('agentshield_app');
     expect(renderedTemplate).toContain('BEDROCK_FOUNDATION_MODEL_ARN');
     expect(renderedTemplate).toContain('FIREBASE_SERVICE_ACCOUNT_SECRET_ARN');
+    expect(renderedTemplate).toContain('TINYFISH_API_KEY');
+    expect(renderedTemplate).toContain('VULNERABILITY_INTEL_TABLE');
   });
 
   test('bootstraps the backend with fail-fast logging and systemd', () => {
@@ -47,7 +49,15 @@ describe('AgentShieldStack', () => {
     expect(renderedTemplate).toContain('yum install -y git jq');
     expect(renderedTemplate).not.toContain('yum install -y git curl jq');
     expect(renderedTemplate).toContain('/etc/systemd/system/agent-shield-backend.service');
+    expect(renderedTemplate).toContain('/etc/systemd/system/agent-shield-vulnerability-refresh.service');
+    expect(renderedTemplate).toContain('/etc/systemd/system/agent-shield-vulnerability-refresh.timer');
     expect(renderedTemplate).toContain('systemctl enable --now agent-shield-backend.service');
-    expect(renderedTemplate).toContain('WorkingDirectory=/opt/agent-shield');
+    expect(renderedTemplate).toContain('systemctl enable --now agent-shield-vulnerability-refresh.timer');
+    expect(renderedTemplate).toContain('OnUnitActiveSec=2d');
+    expect(renderedTemplate).toContain('WorkingDirectory=/opt/agent-shield/server');
+    expect(renderedTemplate).toContain('ExecStart=/usr/bin/npm run vulnerabilities:refresh');
+    expect(renderedTemplate).not.toContain('ExecStart=/usr/bin/npm run start --workspace=server');
+    expect(renderedTemplate).toContain('TinyfishApiKeySecretArn');
+    expect(renderedTemplate).toContain('aws secretsmanager get-secret-value --secret-id');
   });
 });

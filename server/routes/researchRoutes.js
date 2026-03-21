@@ -1,7 +1,12 @@
 const express = require("express");
 const router = express.Router();
-const { researchAgentVulnerabilities } = require("../controllers/researchController");
+const {
+  getStoredAgentVulnerabilities,
+  refreshAgentVulnerabilities,
+} = require("../controllers/researchController");
 
-router.post("/agent-vulnerabilities", researchAgentVulnerabilities);
+router.get("/agent-vulnerabilities", getStoredAgentVulnerabilities);
+router.post("/agent-vulnerabilities", getStoredAgentVulnerabilities);
+router.post("/agent-vulnerabilities/refresh", refreshAgentVulnerabilities);
 
 module.exports = router;
