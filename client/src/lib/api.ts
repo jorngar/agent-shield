@@ -1,6 +1,6 @@
 import type { Intercept, RiskLevel } from "@/lib/types";
 
-const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3001";
+const BASE_URL = `${(import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:3001"}/api`;
 
 // ── Raw API shapes ──────────────────────────────────────────────────────────
 
