@@ -54,7 +54,11 @@ function rtdbDocToIntercept(interceptId: string, data: Record<string, unknown>):
     status,
     riskLevel,
     category:     String(risk.category ?? "System"),
-    confidence:   Number(risk.risk_score ?? confidenceByRisk[riskLevel]),
+    confidence:   (() => {
+                    const s = Number(risk.risk_score ?? confidenceByRisk[riskLevel]);
+                    // Normalise: backend sends 0–100, component expects 0–1
+                    return s > 1 ? s / 100 : s;
+                  })(),
     reason:       String(risk.summary ?? data.reason ?? ""),
     timestamp:    typeof data.timestamp === "number"
                     ? new Date(data.timestamp).toISOString()
