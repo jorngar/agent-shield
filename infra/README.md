@@ -32,7 +32,7 @@ The backend EC2 instance needs:
 - `GitHubTokenSecretArn`: Secrets Manager secret ARN containing a GitHub token (`SecretString` should be the token)
 - `FirebaseServiceAccountSecretArn`: Secrets Manager secret ARN containing the Firebase service account JSON (`SecretString` should be the JSON)
 - `TinyfishApiKeySecretArn`: Secrets Manager secret ARN containing the Tinyfish API key (`SecretString` should be the raw key)
-- `BedrockFoundationModelArn`: the Bedrock foundation model ARN to allow for `bedrock:InvokeModel`
+- `BedrockFoundationModelId`: the Bedrock foundation model ID to allow for `bedrock:InvokeModel`
 
 ## Current stack (what it provisions)
 

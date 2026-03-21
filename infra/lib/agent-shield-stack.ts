@@ -98,10 +98,19 @@ export class AgentShieldStack extends cdk.Stack {
         'Secrets Manager secret ARN containing the Tinyfish API key (SecretString should be the raw key)',
     });
 
-    const bedrockFoundationModelArn = new cdk.CfnParameter(this, 'BedrockFoundationModelArn', {
+    const bedrockFoundationModelId = new cdk.CfnParameter(this, 'BedrockFoundationModelId', {
       type: 'String',
-      description: 'Bedrock foundation model ARN to allow for InvokeModel',
+      description: 'Bedrock foundation model ID to allow for InvokeModel',
     });
+
+    const bedrockFoundationModelArn = cdk.Fn.join('', [
+      'arn:',
+      cdk.Stack.of(this).partition,
+      ':bedrock:',
+      cdk.Stack.of(this).region,
+      '::foundation-model/',
+      bedrockFoundationModelId.valueAsString,
+    ]);
 
     const backendInstanceRole = new iam.Role(this, 'BackendInstanceRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
@@ -128,7 +137,7 @@ export class AgentShieldStack extends cdk.Stack {
     backendInstanceRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ['bedrock:InvokeModel'],
-        resources: [bedrockFoundationModelArn.valueAsString],
+        resources: [bedrockFoundationModelArn],
       }),
     );
 
@@ -190,7 +199,7 @@ export class AgentShieldStack extends cdk.Stack {
       'TINYFISH_BROWSER_PROFILE=lite',
       'VULNERABILITY_REFRESH_LIMIT=100',
       'VULNERABILITY_INTEL_TABLE=agent_vulnerability_intel',
-      `BEDROCK_FOUNDATION_MODEL_ARN=${bedrockFoundationModelArn.valueAsString}`,
+      `BEDROCK_FOUNDATION_MODEL_ID=${bedrockFoundationModelId.valueAsString}`,
       'EOF',
       `cat <<'EOF' > /etc/systemd/system/agent-shield-backend.service`,
       '[Unit]',

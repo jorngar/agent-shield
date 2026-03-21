@@ -117,6 +117,22 @@ except ValueError:
     MAX_CONCURRENT_INTERCEPTS = 1
 MAX_CONCURRENT_INTERCEPTS = max(1, MAX_CONCURRENT_INTERCEPTS)
 
+try:
+    LOCAL_APPROVE_MAX_SCORE = int(
+        os.getenv("AGENT_SHIELD_LOCAL_APPROVE_MAX_SCORE", "25")
+    )
+except ValueError:
+    LOCAL_APPROVE_MAX_SCORE = 25
+LOCAL_APPROVE_MAX_SCORE = max(0, min(100, LOCAL_APPROVE_MAX_SCORE))
+
+try:
+    LOCAL_DENY_MIN_SCORE = int(
+        os.getenv("AGENT_SHIELD_LOCAL_DENY_MIN_SCORE", "75")
+    )
+except ValueError:
+    LOCAL_DENY_MIN_SCORE = 75
+LOCAL_DENY_MIN_SCORE = max(0, min(100, LOCAL_DENY_MIN_SCORE))
+
 LOG_FILE = os.getenv("AGENT_SHIELD_LOG_FILE", ".agent-shield.log").strip()
 
 

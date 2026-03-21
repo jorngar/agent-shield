@@ -68,7 +68,10 @@ async def main():
         print("Session Summary", flush=True)
         print("=" * 50, flush=True)
         print(f"Status: {result['status']}", flush=True)
-        print(f"Codex Exit: {result.get('codex_exit_code')}", flush=True)
+        print(
+            f"Codex Exit: {result.get('codex_exit_display', result.get('codex_exit_code'))}",
+            flush=True,
+        )
         print(f"Total Intercepts: {result['total_intercepts']}", flush=True)
         print(f"Blocked: {result['blocked']}", flush=True)
         print(f"Approved: {result['approved']}", flush=True)
