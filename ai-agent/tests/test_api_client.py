@@ -29,6 +29,12 @@ class FakeAsyncClient:
 
 
 class BackendClientTests(unittest.TestCase):
+    def test_base_url_is_normalized(self):
+        client = BackendClient("https://example.execute-api.ap-southeast-1.amazonaws.com/")
+        self.assertEqual(
+            client.base_url, "https://example.execute-api.ap-southeast-1.amazonaws.com"
+        )
+
     def test_submit_intercept_handles_http_404_without_throwing(self):
         request = httpx.Request("POST", "http://localhost:3000/api/intercept")
         response = httpx.Response(404, request=request, text="not found")

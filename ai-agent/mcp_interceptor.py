@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from api_client import BackendClient
 from config import (
+    BACKEND_URL,
     INTERCEPTABLE_PORTS,
     INTERCEPT_MODE,
     LOG_FILE,
@@ -40,7 +41,7 @@ class MCPInterceptor:
 
     def __init__(
         self,
-        backend_url: str = "http://localhost:3000",
+        backend_url: str = BACKEND_URL,
         agent_name: str = "codex",
         verbose: bool = False,
     ):
@@ -864,7 +865,7 @@ class MCPProxyServer:
 
 
 def create_interceptor(
-    backend_url: str = "http://localhost:3000",
+    backend_url: str = BACKEND_URL,
     agent_name: str = "codex",
     verbose: bool = False,
 ) -> MCPInterceptor:

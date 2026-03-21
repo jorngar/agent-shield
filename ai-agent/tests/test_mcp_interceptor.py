@@ -116,6 +116,16 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
         self.assertTrue(interceptor._is_whitelisted_endpoint("127.0.0.1", 3300))
         self.assertTrue(interceptor._is_whitelisted_endpoint("localhost", 11434))
 
+    def test_https_backend_endpoint_is_auto_whitelisted(self):
+        interceptor = MCPInterceptor(
+            backend_url="https://n73h8lxc41.execute-api.ap-southeast-1.amazonaws.com/"
+        )
+        self.assertTrue(
+            interceptor._is_whitelisted_endpoint(
+                "n73h8lxc41.execute-api.ap-southeast-1.amazonaws.com", 443
+            )
+        )
+
 
 class MCPInterceptorSessionTests(unittest.TestCase):
     @patch.object(MCPInterceptor, "_refresh_mcp_targets")
