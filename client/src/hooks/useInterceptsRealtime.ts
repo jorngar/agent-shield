@@ -1,17 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
-import {
-  collection,
-  onSnapshot,
-  doc,
-  updateDoc,
-  query,
-  orderBy,
-  Timestamp,
-} from "firebase/firestore";
-import { db } from "@/lib/firebase";
+import { ref, onValue, off } from "firebase/database";
+import { rtdb } from "@/lib/firebase";
 import type { Intercept, DecisionStatus } from "@/lib/types";
 import { mockIntercepts } from "@/lib/mock-data";
 import { useApiIntercepts } from "./useApiIntercepts";
+import { patchDecision } from "@/lib/api";
 
 export interface UseInterceptsReturn {
   intercepts: Intercept[];
@@ -22,37 +15,61 @@ export interface UseInterceptsReturn {
   retry: () => void;
 }
 
-// Priority: REST API > Firestore > Mock
+// Priority: REST API > Firebase RTDB > Mock
 const API_CONFIGURED      = Boolean(import.meta.env.VITE_API_URL);
-const FIREBASE_CONFIGURED = Boolean(import.meta.env.VITE_FIREBASE_PROJECT_ID);
+const FIREBASE_CONFIGURED = Boolean(import.meta.env.VITE_FIREBASE_DATABASE_URL);
 
-// ── Firestore path ──────────────────────────────────────────────────────────
-const interceptsRef = () =>
-  query(collection(db, "intercepts"), orderBy("timestamp", "desc"));
+// ── Map RTDB doc → Intercept ─────────────────────────────────────────────────
+function rtdbDocToIntercept(interceptId: string, data: Record<string, unknown>): Intercept {
+  const risk = (data.risk ?? {}) as Record<string, unknown>;
 
-function normaliseTimestamp(value: unknown): string {
-  if (value instanceof Timestamp) return value.toDate().toISOString();
-  if (typeof value === "string") return value;
-  return new Date().toISOString();
-}
+  const userSelected = data.user_selected as string | null;
+  let status: Intercept["status"] = "pending";
+  if (userSelected === "approve") status = "approved";
+  else if (userSelected === "deny") status = "denied";
 
-function docToIntercept(id: string, data: Record<string, unknown>): Intercept {
+  const riskLevel = (() => {
+    const lvl = String(risk.risk_level ?? "").toLowerCase();
+    if (lvl === "high" || lvl === "critical") return "high" as const;
+    if (lvl === "medium")                      return "medium" as const;
+    return "low" as const;
+  })();
+
+  let parsedArgs: Record<string, unknown> = {};
+  if (data.content) {
+    try {
+      parsedArgs = typeof data.content === "string"
+        ? JSON.parse(data.content as string)
+        : (data.content as Record<string, unknown>);
+    } catch {
+      parsedArgs = { raw: data.content };
+    }
+  }
+
+  const confidenceByRisk = { high: 0.91, medium: 0.76, low: 0.60 };
+
   return {
-    id,
-    toolName:     String(data.toolName ?? ""),
-    status:       (data.status as Intercept["status"]) ?? "pending",
-    riskLevel:    (data.riskLevel as Intercept["riskLevel"]) ?? "low",
-    category:     String(data.category ?? ""),
-    confidence:   Number(data.confidence ?? 0),
-    reason:       String(data.reason ?? ""),
-    timestamp:    normaliseTimestamp(data.timestamp),
-    decidedAt:    data.decidedAt ? normaliseTimestamp(data.decidedAt) : undefined,
-    arguments:    (data.arguments as Record<string, unknown>) ?? {},
-    matchedRules: (data.matchedRules as string[]) ?? [],
+    id:           interceptId,
+    toolName:     String(data.action_type ?? ""),
+    status,
+    riskLevel,
+    category:     String(risk.category ?? "System"),
+    confidence:   Number(risk.risk_score ?? confidenceByRisk[riskLevel]),
+    reason:       String(risk.summary ?? data.reason ?? ""),
+    timestamp:    typeof data.timestamp === "number"
+                    ? new Date(data.timestamp).toISOString()
+                    : new Date().toISOString(),
+    decidedAt:    data.decided_at
+                    ? new Date(data.decided_at as number).toISOString()
+                    : undefined,
+    arguments:    parsedArgs,
+    matchedRules: Array.isArray(risk.flags)
+                    ? (risk.flags as string[])
+                    : [String(data.reason ?? "").slice(0, 40)],
   };
 }
 
-// ── Mock fallback ───────────────────────────────────────────────────────────
+// ── Mock fallback ────────────────────────────────────────────────────────────
 function useMockIntercepts(): UseInterceptsReturn {
   const [intercepts, setIntercepts]   = useState<Intercept[]>([]);
   const [isLoading, setIsLoading]     = useState(true);
@@ -84,8 +101,8 @@ function useMockIntercepts(): UseInterceptsReturn {
   return { intercepts, isLoading, error: null, lastUpdated, decide, retry: () => {} };
 }
 
-// ── Firestore realtime hook ─────────────────────────────────────────────────
-function useFirestoreIntercepts(): UseInterceptsReturn {
+// ── Firebase Realtime Database hook ─────────────────────────────────────────
+function useRtdbIntercepts(): UseInterceptsReturn {
   const [intercepts, setIntercepts]   = useState<Intercept[]>([]);
   const [isLoading, setIsLoading]     = useState(true);
   const [error, setError]             = useState<string | null>(null);
@@ -95,14 +112,21 @@ function useFirestoreIntercepts(): UseInterceptsReturn {
   useEffect(() => {
     setIsLoading(true);
     setError(null);
-    const unsubscribe = onSnapshot(
-      interceptsRef(),
+
+    const interceptsRef = ref(rtdb, "intercepts");
+
+    onValue(
+      interceptsRef,
       (snapshot) => {
-        setIntercepts(
-          snapshot.docs.map((d) =>
-            docToIntercept(d.id, d.data() as Record<string, unknown>)
-          )
-        );
+        const raw = snapshot.val() as Record<string, Record<string, unknown>> | null;
+        if (!raw) {
+          setIntercepts([]);
+        } else {
+          const mapped = Object.entries(raw)
+            .map(([id, data]) => rtdbDocToIntercept(id, data))
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+          setIntercepts(mapped);
+        }
         setLastUpdated(new Date());
         setIsLoading(false);
       },
@@ -111,16 +135,26 @@ function useFirestoreIntercepts(): UseInterceptsReturn {
         setIsLoading(false);
       }
     );
-    return () => unsubscribe();
+
+    return () => off(interceptsRef);
   }, [retryKey]);
 
   const decide = useCallback(
     async (id: string, decision: Exclude<DecisionStatus, "pending">) => {
-      await updateDoc(doc(db, "intercepts", id), {
-        status: decision,
-        decidedAt: Timestamp.now(),
-      });
+      const verdict = decision === "approved" ? "approve" : "deny";
+
+      // Optimistic update
+      setIntercepts((prev) =>
+        prev.map((i) =>
+          i.id === id
+            ? { ...i, status: decision, decidedAt: new Date().toISOString() }
+            : i
+        )
+      );
       setLastUpdated(new Date());
+
+      // id IS the intercept_id UUID from RTDB — correct for the backend endpoint
+      await patchDecision(id, verdict);
     },
     []
   );
@@ -135,14 +169,14 @@ function useFirestoreIntercepts(): UseInterceptsReturn {
   };
 }
 
-// ── Dispatcher: API > Firebase > Mock ──────────────────────────────────────
+// ── Dispatcher: API > RTDB > Mock ────────────────────────────────────────────
 // Rules-of-hooks: all three must always be called; we select after.
 export function useIntercepts(): UseInterceptsReturn {
-  const api      = useApiIntercepts();
-  const firestore = useFirestoreIntercepts();
-  const mock     = useMockIntercepts();
+  const api  = useApiIntercepts();
+  const rtdb = useRtdbIntercepts();
+  const mock = useMockIntercepts();
 
   if (API_CONFIGURED)      return api;
-  if (FIREBASE_CONFIGURED) return firestore;
+  if (FIREBASE_CONFIGURED) return rtdb;
   return mock;
 }
