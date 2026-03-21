@@ -5,14 +5,17 @@ import { StatsBar } from "@/components/dashboard/StatsBar";
 import { InterceptList } from "@/components/dashboard/InterceptList";
 import { InspectorPanel } from "@/components/dashboard/InspectorPanel";
 import { DecisionPanel } from "@/components/dashboard/DecisionPanel";
+import { DashboardTour } from "@/components/dashboard/DashboardTour";
 import { seedFirestore } from "@/lib/seed";
 
 const IS_DEV = import.meta.env.DEV;
+const TOUR_KEY = "agentshield_tour_done";
 
 export default function DashboardPage() {
   const { intercepts, isLoading, error, lastUpdated, decide, retry } = useIntercepts();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [mobileView, setMobileView] = useState<"list" | "detail">("list");
+  const [selectedId, setSelectedId]   = useState<string | null>(null);
+  const [mobileView, setMobileView]   = useState<"list" | "detail">("list");
+  const [tourActive, setTourActive]   = useState(() => !localStorage.getItem(TOUR_KEY));
 
   const selected = intercepts.find((i) => i.id === selectedId) ?? null;
 
@@ -21,19 +24,30 @@ export default function DashboardPage() {
     setMobileView("detail");
   }
 
+  function handleTourFinish() {
+    localStorage.setItem(TOUR_KEY, "1");
+    setTourActive(false);
+  }
+
   return (
     <div className="flex h-dvh flex-col bg-background text-foreground">
 
-      <Header
-        intercepts={intercepts}
-        lastUpdated={lastUpdated}
-        isLoading={isLoading}
-        selectedToolName={selected?.toolName}
-        showBackButton={mobileView === "detail"}
-        onShowList={() => setMobileView("list")}
-      />
+      <DashboardTour run={tourActive} onFinish={handleTourFinish} />
 
-      <StatsBar intercepts={intercepts} isLoading={isLoading} />
+      <div id="tour-header">
+        <Header
+          intercepts={intercepts}
+          lastUpdated={lastUpdated}
+          isLoading={isLoading}
+          selectedToolName={selected?.toolName}
+          showBackButton={mobileView === "detail"}
+          onShowList={() => setMobileView("list")}
+        />
+      </div>
+
+      <div id="tour-stats">
+        <StatsBar intercepts={intercepts} isLoading={isLoading} />
+      </div>
 
       {/* Dev seed bar */}
       {IS_DEV && (
@@ -46,6 +60,12 @@ export default function DashboardPage() {
           >
             seed firestore
           </button>
+          <button
+            onClick={() => { localStorage.removeItem(TOUR_KEY); setTourActive(true); }}
+            className="rounded border border-border/50 px-2 py-0.5 font-mono text-[10px] text-muted-foreground/60 hover:border-primary/40 hover:text-primary"
+          >
+            replay tour
+          </button>
         </div>
       )}
 
@@ -57,7 +77,7 @@ export default function DashboardPage() {
         <div className="hidden flex-1 overflow-hidden lg:flex">
 
           {/* Left: intercept stream */}
-          <div className="w-64 shrink-0 border-r border-border xl:w-72">
+          <div id="tour-intercept-list" className="w-64 shrink-0 border-r border-border xl:w-72">
             <InterceptList
               intercepts={intercepts}
               selectedId={selectedId}
@@ -69,12 +89,12 @@ export default function DashboardPage() {
           </div>
 
           {/* Center: inspector */}
-          <div className="flex flex-1 flex-col overflow-hidden border-r border-border">
+          <div id="tour-inspector" className="flex flex-1 flex-col overflow-hidden border-r border-border">
             <InspectorPanel intercept={selected} />
           </div>
 
           {/* Right: decision panel */}
-          <div className="w-64 shrink-0 xl:w-72">
+          <div id="tour-decision" className="w-64 shrink-0 xl:w-72">
             <DecisionPanel
               intercept={selected}
               onApprove={(id, reason) => decide(id, "approved", reason)}
