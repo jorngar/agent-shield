@@ -9,13 +9,11 @@ import { DashboardTour } from "@/components/dashboard/DashboardTour";
 import { seedFirestore } from "@/lib/seed";
 
 const IS_DEV = import.meta.env.DEV;
-const TOUR_KEY = "agentshield_tour_done";
-
 export default function DashboardPage() {
   const { intercepts, isLoading, error, lastUpdated, decide, retry } = useIntercepts();
   const [selectedId, setSelectedId]   = useState<string | null>(null);
   const [mobileView, setMobileView]   = useState<"list" | "detail">("list");
-  const [tourActive, setTourActive]   = useState(() => !localStorage.getItem(TOUR_KEY));
+  const [tourActive, setTourActive]   = useState(true);
 
   const selected = intercepts.find((i) => i.id === selectedId) ?? null;
 
@@ -25,7 +23,6 @@ export default function DashboardPage() {
   }
 
   function handleTourFinish() {
-    localStorage.setItem(TOUR_KEY, "1");
     setTourActive(false);
   }
 
@@ -61,7 +58,7 @@ export default function DashboardPage() {
             seed firestore
           </button>
           <button
-            onClick={() => { localStorage.removeItem(TOUR_KEY); setTourActive(true); }}
+            onClick={() => setTourActive(true)}
             className="rounded border border-border/50 px-2 py-0.5 font-mono text-[10px] text-muted-foreground/60 hover:border-primary/40 hover:text-primary"
           >
             replay tour
