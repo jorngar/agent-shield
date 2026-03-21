@@ -40,8 +40,19 @@ test("GET /api returns route index", async () => {
 
     const body = await response.json();
     assert.equal(body.service, "agent-shield-backend");
+    assert.ok(body.routes.includes("GET /api/audit"));
     assert.ok(body.routes.includes("POST /api/intercept"));
     assert.ok(body.routes.includes("POST /api/session/result"));
+  });
+});
+
+test("GET /api/audit returns audit entries", async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/audit?limit=5`);
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+    assert.ok(Array.isArray(body));
   });
 });
 

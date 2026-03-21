@@ -34,7 +34,8 @@ describe('AgentShieldStack', () => {
     expect(renderedTemplate).not.toContain('OLLAMA_HOST');
     expect(renderedTemplate).not.toContain(`"username":"admin"`);
     expect(renderedTemplate).toContain('agentshield_app');
-    expect(renderedTemplate).toContain('BEDROCK_FOUNDATION_MODEL_ARN');
+    expect(renderedTemplate).toContain('BEDROCK_FOUNDATION_MODEL_ID');
+    expect(renderedTemplate).toContain('foundation-model/');
     expect(renderedTemplate).toContain('FIREBASE_SERVICE_ACCOUNT_SECRET_ARN');
     expect(renderedTemplate).toContain('TINYFISH_API_KEY');
     expect(renderedTemplate).toContain('VULNERABILITY_INTEL_TABLE');

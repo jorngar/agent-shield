@@ -20,6 +20,8 @@ from config import (
     BACKEND_URL,
     INTERCEPTABLE_PORTS,
     INTERCEPT_MODE,
+    LOCAL_APPROVE_MAX_SCORE,
+    LOCAL_DENY_MIN_SCORE,
     LOG_FILE,
     MAX_CONCURRENT_INTERCEPTS,
     OLLAMA_HOST,
@@ -72,6 +74,7 @@ class MCPInterceptor:
         self._scheduled_futures: Set[concurrent.futures.Future] = set()
         self._scheduled_futures_lock = threading.Lock()
         self._intercept_semaphore: Optional[asyncio.Semaphore] = None
+        self._shield_terminated_root = False
         (
             self._whitelist_hosts,
             self._whitelist_ports,
@@ -828,9 +831,52 @@ class MCPInterceptor:
         except Exception:
             pass
 
+    def _record_shield_termination(self, pid: int) -> None:
+        if self.process and pid == self.process.pid:
+            self._shield_terminated_root = True
+
+    @staticmethod
+    def _coerce_risk_score(value: Any) -> int:
+        try:
+            score = int(value)
+        except (TypeError, ValueError):
+            return 50
+        return max(0, min(100, score))
+
+    def _resolve_local_triage(self, risk: Dict[str, Any]) -> Tuple[Optional[str], str]:
+        recommended_action = str(risk.get("recommended_action", "review")).lower()
+        risk_level = str(risk.get("risk_level", "medium")).lower()
+        risk_score = self._coerce_risk_score(risk.get("risk_score"))
+
+        if (
+            recommended_action == "approve"
+            and risk_level == "low"
+            and risk_score <= LOCAL_APPROVE_MAX_SCORE
+        ):
+            return "approve", "local_low_risk_auto_approve"
+
+        if (
+            recommended_action == "deny"
+            and risk_level in {"high", "critical"}
+            and risk_score >= LOCAL_DENY_MIN_SCORE
+        ):
+            return "deny", "local_high_risk_auto_deny"
+
+        return None, "cloud_review_required"
+
+    @staticmethod
+    def _format_codex_exit_display(
+        codex_exit_code: Optional[int], shield_terminated_root: bool
+    ) -> str:
+        if codex_exit_code is None:
+            return "n/a"
+        if shield_terminated_root and codex_exit_code < 0:
+            return f"blocked by shield (signal {-codex_exit_code})"
+        return str(codex_exit_code)
+
     async def _submit_intercept_for_decision(
         self, action_type: str, content: str, risk: Dict[str, Any]
-    ) -> Tuple[Optional[str], str]:
+    ) -> Tuple[Optional[str], str, str, str]:
         final_decision = "deny"
         intercept_id = None
 
@@ -840,6 +886,21 @@ class MCPInterceptor:
             f"content_preview={content[:120]}; "
             f"risk_level={risk.get('risk_level')}; "
             f"recommended_action={risk.get('recommended_action')}",
+            level="DEBUG",
+        )
+
+        local_decision, decision_reason = self._resolve_local_triage(risk)
+        if local_decision in {"approve", "deny"}:
+            self._log(
+                "Local triage resolved intercept without cloud escalation: "
+                f"action_type={action_type}; decision={local_decision}; reason={decision_reason}",
+                level="DEBUG",
+            )
+            return None, local_decision, "local", decision_reason
+
+        self._log(
+            "Escalating intercept to backend for cloud review: "
+            f"action_type={action_type}; reason={decision_reason}",
             level="DEBUG",
         )
 
@@ -883,7 +944,7 @@ class MCPInterceptor:
                 level="WARNING",
             )
 
-        return intercept_id, final_decision
+        return intercept_id, final_decision, "cloud", decision_reason
 
     def _monitor_process_spawns(self) -> None:
         if not self.process or not self._loop:
@@ -1027,20 +1088,30 @@ class MCPInterceptor:
                 ),
             )
 
-            intercept_id, final_decision = await self._submit_intercept_for_decision(
+            (
+                intercept_id,
+                final_decision,
+                decision_source,
+                decision_reason,
+            ) = await self._submit_intercept_for_decision(
                 action_type=action_type, content=cmdline, risk=risk
             )
 
             if final_decision == "deny":
-                self._log(f"BLOCKED - {risk.get('summary')}")
+                self._log(
+                    f"BLOCKED - {risk.get('summary')} (source={decision_source}, reason={decision_reason})"
+                )
                 self.blocked_count += 1
+                self._record_shield_termination(pid)
                 await asyncio.to_thread(self._kill_process_tree, pid)
             else:
-                self._log("APPROVED")
+                self._log(
+                    f"APPROVED (source={decision_source}, reason={decision_reason})"
+                )
                 self.approved_count += 1
 
             self._log(
-                f"Process spawn intercepted end (PID: {pid}, action_type={action_type}, decision={final_decision}, intercept_id={intercept_id})",
+                f"Process spawn intercepted end (PID: {pid}, action_type={action_type}, decision={final_decision}, intercept_id={intercept_id}, source={decision_source})",
                 level="DEBUG",
             )
 
@@ -1056,6 +1127,8 @@ class MCPInterceptor:
                     "event_type": "process_spawn",
                     "action_type": action_type,
                     "detection_reason": detection_reason,
+                    "decision_source": decision_source,
+                    "decision_reason": decision_reason,
                 }
             )
 
@@ -1097,22 +1170,32 @@ class MCPInterceptor:
                 ),
             )
 
-            intercept_id, final_decision = await self._submit_intercept_for_decision(
+            (
+                intercept_id,
+                final_decision,
+                decision_source,
+                decision_reason,
+            ) = await self._submit_intercept_for_decision(
                 action_type=action_type,
                 content=f"{local_endpoint}->{remote_endpoint}",
                 risk=risk,
             )
 
             if final_decision == "deny":
-                self._log(f"BLOCKED connection - {risk.get('summary')}")
+                self._log(
+                    f"BLOCKED connection - {risk.get('summary')} (source={decision_source}, reason={decision_reason})"
+                )
                 self.blocked_count += 1
+                self._record_shield_termination(pid)
                 await asyncio.to_thread(self._kill_process_tree, pid)
             else:
-                self._log("APPROVED connection")
+                self._log(
+                    f"APPROVED connection (source={decision_source}, reason={decision_reason})"
+                )
                 self.approved_count += 1
 
             self._log(
-                f"Connection intercepted end ({action_type}, PID: {pid}, role={process_role}, decision={final_decision}, intercept_id={intercept_id})",
+                f"Connection intercepted end ({action_type}, PID: {pid}, role={process_role}, decision={final_decision}, intercept_id={intercept_id}, source={decision_source})",
                 level="DEBUG",
             )
 
@@ -1130,6 +1213,8 @@ class MCPInterceptor:
                     "process_role": process_role,
                     "action_type": action_type,
                     "detection_reason": detection_reason,
+                    "decision_source": decision_source,
+                    "decision_reason": decision_reason,
                 }
             )
 
@@ -1145,7 +1230,12 @@ class MCPInterceptor:
             f"MCP type: {mcp_info.get('type', 'unknown')}",
         )
 
-        intercept_id, final_decision = await self._submit_intercept_for_decision(
+        (
+            intercept_id,
+            final_decision,
+            decision_source,
+            decision_reason,
+        ) = await self._submit_intercept_for_decision(
             action_type="mcp_http_payload", content=content, risk=risk
         )
 
@@ -1155,7 +1245,7 @@ class MCPInterceptor:
             self.approved_count += 1
 
         self._log(
-            f"MCP HTTP proxy payload detected end (decision={final_decision}, intercept_id={intercept_id})",
+            f"MCP HTTP proxy payload detected end (decision={final_decision}, intercept_id={intercept_id}, source={decision_source}, reason={decision_reason})",
             level="DEBUG",
         )
 
@@ -1167,6 +1257,8 @@ class MCPInterceptor:
                 "timestamp": datetime.utcnow().isoformat(),
                 "content_preview": content[:100],
                 "event_type": "proxy_payload",
+                "decision_source": decision_source,
+                "decision_reason": decision_reason,
             }
         )
 
@@ -1187,12 +1279,17 @@ class MCPInterceptor:
     ) -> Dict[str, Any]:
         if status_override:
             status = status_override
-        elif codex_exit_code not in (None, 0):
-            status = "failed"
         elif self.blocked_count > 0:
             status = "blocked"
+        elif codex_exit_code not in (None, 0):
+            status = "failed"
         else:
             status = "success"
+
+        codex_exit_display = self._format_codex_exit_display(
+            codex_exit_code=codex_exit_code,
+            shield_terminated_root=self._shield_terminated_root,
+        )
 
         await self.backend_client.report_session_result(
             session_id=self.session_id, status=status, intercepts=self.intercepts
@@ -1205,6 +1302,8 @@ class MCPInterceptor:
             "blocked": self.blocked_count,
             "approved": self.approved_count,
             "codex_exit_code": codex_exit_code,
+            "codex_exit_display": codex_exit_display,
+            "shield_terminated_root": self._shield_terminated_root,
             "error": error_message,
         }
 

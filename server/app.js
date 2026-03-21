@@ -15,6 +15,7 @@ const apiIndex = {
     "GET /health",
     "GET /api",
     "GET /api/health",
+    "GET /api/audit",
     "POST /api/intercept",
     "GET /api/intercept/:id",
     "PUT /api/intercept/:id/decision",
@@ -55,6 +56,7 @@ function createApp() {
   app.use("/audit", auditRoutes);
 
   app.use("/api/health", healthRoutes);
+  app.use("/api/audit", auditRoutes);
   app.use("/api/intercept", interceptRoutes);
   app.use("/api/session", sessionRoutes);
   app.use("/api/research", researchRoutes);
