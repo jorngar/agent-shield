@@ -10,6 +10,7 @@ class BackendClient:
     def __init__(self, base_url: str = BACKEND_URL):
         self.base_url = (base_url or BACKEND_URL).rstrip("/")
         self.timeout = 5.0
+        self.debug_hook = None
 
     def _api_url(self, path: str) -> str:
         clean_path = "/" + path.lstrip("/")
@@ -17,12 +18,21 @@ class BackendClient:
             return f"{self.base_url}{clean_path}"
         return f"{self.base_url}/api{clean_path}"
 
+    def _debug(self, message: str) -> None:
+        if callable(self.debug_hook):
+            self.debug_hook(message)
+
     async def health_check(self) -> Dict[str, Any]:
         async with httpx.AsyncClient() as client:
             try:
+                request_url = self._api_url("/health")
+                self._debug(f"GET {request_url} (health check) start")
                 response = await client.get(
-                    self._api_url("/health"),
+                    request_url,
                     timeout=self.timeout,
+                )
+                self._debug(
+                    f"GET {request_url} (health check) -> {response.status_code}"
                 )
                 if response.is_error:
                     return {
@@ -69,17 +79,25 @@ class BackendClient:
         }
         """
         async with httpx.AsyncClient() as client:
+            payload = {
+                "session_id": session_id,
+                "agent": agent,
+                "action_type": action_type,
+                "content": content,
+                "risk": risk,
+            }
+            request_url = self._api_url("/intercept")
             try:
+                self._debug(
+                    f"POST {request_url} submit_intercept start action_type={action_type}"
+                )
                 response = await client.post(
-                    self._api_url("/intercept"),
-                    json={
-                        "session_id": session_id,
-                        "agent": agent,
-                        "action_type": action_type,
-                        "content": content,
-                        "risk": risk,
-                    },
+                    request_url,
+                    json=payload,
                     timeout=self.timeout,
+                )
+                self._debug(
+                    f"POST {request_url} submit_intercept -> {response.status_code}"
                 )
                 if response.is_error:
                     return {
@@ -87,10 +105,22 @@ class BackendClient:
                         "status": "error",
                         "http_status": response.status_code,
                         "error": response.text[:300],
+                        "request_url": request_url,
                     }
-                return response.json()
+                result = response.json()
+                result["request_url"] = request_url
+                return result
             except httpx.HTTPError as e:
-                return {"intercept_id": None, "status": "error", "error": str(e)}
+                error_message = f"{type(e).__name__}: {e}".strip(": ")
+                self._debug(
+                    f"POST {request_url} submit_intercept error {error_message}"
+                )
+                return {
+                    "intercept_id": None,
+                    "status": "error",
+                    "error": error_message,
+                    "request_url": request_url,
+                }
 
     async def poll_decision(
         self, intercept_id: str, max_attempts: int = 60, poll_interval: float = 0.5
@@ -107,14 +137,22 @@ class BackendClient:
         async with httpx.AsyncClient() as client:
             for _ in range(max_attempts):
                 await asyncio.sleep(poll_interval)
+                request_url = self._api_url(f"/intercept/{intercept_id}")
                 try:
+                    self._debug(
+                        f"GET {request_url} poll_decision start intercept_id={intercept_id}"
+                    )
                     response = await client.get(
-                        self._api_url(f"/intercept/{intercept_id}"),
+                        request_url,
                         timeout=self.timeout,
+                    )
+                    self._debug(
+                        f"GET {request_url} poll_decision -> {response.status_code}"
                     )
                     if response.is_error:
                         continue
                     data = response.json()
+                    data["request_url"] = request_url
                     if data.get("decision") in ("approve", "deny"):
                         return data
                 except (httpx.HTTPError, ValueError):
@@ -143,8 +181,12 @@ class BackendClient:
         """
         async with httpx.AsyncClient() as client:
             try:
+                request_url = self._api_url("/session/result")
+                self._debug(
+                    f"POST {request_url} report_session_result start status={status}"
+                )
                 response = await client.post(
-                    self._api_url("/session/result"),
+                    request_url,
                     json={
                         "session_id": session_id,
                         "status": status,
@@ -152,14 +194,24 @@ class BackendClient:
                     },
                     timeout=self.timeout,
                 )
+                self._debug(
+                    f"POST {request_url} report_session_result -> {response.status_code}"
+                )
                 if response.is_error:
                     return {
                         "error": response.text[:300],
                         "http_status": response.status_code,
+                        "request_url": request_url,
                     }
-                return response.json()
+                result = response.json()
+                result["request_url"] = request_url
+                return result
             except httpx.HTTPError as e:
-                return {"error": str(e)}
+                error_message = f"{type(e).__name__}: {e}".strip(": ")
+                self._debug(
+                    f"POST {request_url} report_session_result error {error_message}"
+                )
+                return {"error": error_message}
 
 
 def create_backend_client() -> BackendClient:

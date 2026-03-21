@@ -1,132 +1,198 @@
 # ai-agent (Agent Shield wrapper)
 
-Python wrapper that launches Codex and intercepts suspicious process/network activity before it is allowed to continue.
+`ai-agent` is a Python wrapper around Codex. It launches Codex as a subprocess, watches its process tree and established TCP connections, runs risk analysis through Ollama, and asks a backend approval API whether suspicious activity should continue.
 
-## What it does
+This wrapper is runtime enforcement, not a full sandbox. It can block risky child processes and network connections, but it does not prevent filesystem writes by itself. If you want hard write restrictions, pass Codex a read-only sandbox through `AGENT_SHIELD_CODEX_ARGS`.
 
-1. Starts Codex as a subprocess with inherited stdio (TTY-friendly behavior).
-2. Loads configured MCP targets from `codex mcp list --json` (or `npx -y @openai/codex ...` fallback).
-3. Monitors Codex child processes plus established TCP connections from Codex itself and its descendants.
-4. Runs risk analysis via local Ollama.
-5. Sends intercept payloads to backend approval API.
-6. Enforces decision:
-   - `approve`: allow process/connection.
-   - `deny`: kill the process tree.
-7. Reports final session status to backend.
+## Overview
 
-Fail-closed behavior:
-- If intercept submission fails (network/HTTP/non-2xx), decision defaults to `deny`.
-- If polling never returns `approve` or `deny` (~30s default), decision defaults to `deny`.
-- Logs are written to `.agent-shield.log` by default so Codex TUI output is not polluted.
+At a high level the wrapper does this:
 
-Scope:
-- This wrapper does not hard-sandbox filesystem writes.
-- It intercepts and blocks based on runtime process/network activity.
-- For hard write prevention, run Codex with a read-only sandbox via `AGENT_SHIELD_CODEX_ARGS`.
+1. Loads local environment from `.env` when present.
+2. Resolves the Codex command from config, with a runtime fallback to `npx -y @openai/codex` if `codex` is not installed.
+3. Refreshes known MCP targets from `codex mcp list --json`, with the same `npx` fallback when needed.
+4. Starts Codex with inherited stdio so the TUI behaves normally.
+5. Polls the Codex process tree for new descendants and established TCP connections.
+6. Classifies suspicious activity, analyzes it with Ollama, and submits an intercept to the backend.
+7. Enforces the backend decision:
+   - `approve`: allow the process or connection to continue.
+   - `deny`: kill the relevant process tree.
+8. Reports the final session outcome to the backend.
+
+Important runtime semantics:
+- Intercept decisions are fail-closed. Submission failures, missing `intercept_id`, or polling timeout all resolve to `deny`.
+- Backend health checks are best effort. Startup continues even if `GET /api/health` fails.
+- Final session reporting is best effort. A failed `POST /api/session/result` does not change the already computed wrapper result.
+- Backend and Ollama traffic is auto-whitelisted by hostname, localhost alias, and resolved IP address so the wrapper does not self-intercept its own approval and risk-analysis calls.
+- Logs go to `.agent-shield.log` by default so Codex TUI output stays clean unless `--verbose` is used.
 
 ## Intercept modes
 
-`AGENT_SHIELD_INTERCEPT_MODE` controls how aggressively process/connection events are intercepted.
+`AGENT_SHIELD_INTERCEPT_MODE` controls how aggressively process and connection events are intercepted.
 
 ### `mcp-targets`
 
-Intercept when a descendant process/connection looks MCP-related:
-- Command matches MCP patterns (`action_type=mcp_process_spawn`).
-- Command references configured MCP host/port or known MCP proxy ports (`action_type=mcp_shell_target_access`).
-- Established connection matches MCP process/targets/ports (`action_type=mcp_connection_attempt`).
+Only intercept activity that looks MCP-related:
+- A descendant command matches configured MCP patterns: `mcp_process_spawn`
+- A command references a configured MCP host or port, or a known proxy port: `mcp_shell_target_access`
+- An established connection matches an MCP process, configured MCP host or port, or a known proxy port: `mcp_connection_attempt`
 
 ### `process-tree` (default)
 
-Intercept all non-whitelisted child processes and all non-whitelisted connections from the Codex process tree:
-- Any child process spawn (`action_type=child_process_spawn`).
-- Any non-whitelisted established connection from Codex or a child (`action_type=agent_connection_attempt`).
-- Codex root outbound HTTPS is classified as Responses API traffic (`action_type=responses_api_connection_attempt`) unless whitelisted.
+Intercept the full Codex process tree except explicitly whitelisted items:
+- Any non-whitelisted child process spawn: `child_process_spawn`
+- Any non-whitelisted established TCP connection from Codex or a descendant: `agent_connection_attempt`
+- Root Codex outbound HTTPS to a non-local host is classified as model-provider traffic: `responses_api_connection_attempt`
 
 ### `strict`
 
-Intercept all non-whitelisted descendants:
-- Any shell process spawn (`action_type=shell_process_spawn`).
-- Any established connection (`action_type=agent_connection_attempt`).
+Intercept all non-whitelisted descendants more aggressively:
+- Any descendant shell process spawn: `shell_process_spawn`
+- Any established TCP connection: `agent_connection_attempt`
 
 ## Requirements
 
 - Python 3.9+
-- Dependencies from `requirements.txt`
-- System tools used by monitoring: `pgrep`, `ps`, `lsof`, `kill`
-- Backend service implementing the contract in `BACKEND_API.md`
-- Ollama running with an available model (default `qwen3.5:0.8b`)
+- Python packages from `requirements.txt`
+- POSIX-style monitoring tools available on the host: `pgrep`, `ps`, `lsof`, `kill`
+- A backend service that implements the contract in `BACKEND_API.md`
+- Ollama running with an available model
+- Either a `codex` binary on `PATH` or `npx`
 
-Codex command resolution:
-- Uses `AGENT_SHIELD_CODEX_COMMAND` if set.
-- Default command is `codex`.
-- If `codex` is unavailable, it falls back to `npx -y @openai/codex`.
+Default toolchain values:
+- Ollama host: `http://localhost:11434`
+- Ollama model: `qwen3.5:0.8b`
+- Backend URL: `http://localhost:3000`
 
 ## Local setup
 
-1. Install dependencies:
-   - `python3 -m pip install -r requirements.txt`
-2. Configure environment (optional but recommended):
-   - `cp .env-example .env`
-   - `set -a; source .env; set +a`
-   - `python3 cli.py` and `npm run start` also auto-load `ai-agent/.env` if present.
-   - Existing process environment variables win over `.env` values; within the same `.env` file, later lines override earlier ones.
-   - `.env-example` defaults Codex to `-s read-only` so the wrapper starts with filesystem writes sandboxed.
-3. Start backend service (default expected URL: `http://localhost:3000`).
-   - For AWS/API Gateway deployment, set `AGENT_SHIELD_BACKEND_URL` to your API endpoint instead of using `localhost`.
+1. Install Python dependencies:
+
+   ```bash
+   python3 -m pip install -r requirements.txt
+   ```
+
+2. Copy the example environment and adjust it for your machine:
+
+   ```bash
+   cp .env-example .env
+   ```
+
+3. Start Ollama and make sure the configured model is available.
+
+4. Start the approval backend.
+
+Environment loading behavior:
+- `config.py` loads `.env` from the module directory first, then from the current working directory if it is different.
+- Existing process environment variables always win over `.env` values.
+- Inside the same `.env` file, later assignments override earlier ones.
+- `.env-example` defaults Codex to `-s read-only`, so the wrapper starts with filesystem writes sandboxed unless you change it.
+
+For AWS or API Gateway deployments:
+- Set `AGENT_SHIELD_BACKEND_URL` to the API host root such as `https://...execute-api...amazonaws.com`
+- A value ending in `/api` also works; the client normalizes both forms
 
 ## Run
 
-- Direct:
-  - `python3 cli.py --backend http://localhost:3000`
-  - `python3 cli.py --backend http://localhost:3000 -- --help`
-  - `AGENT_SHIELD_BACKEND_URL=https://n73h8lxc41.execute-api.ap-southeast-1.amazonaws.com python3 cli.py`
-- Via npm scripts:
-  - `npm run dev -- --help`
+Direct examples:
 
-Run tests:
-- `npm test`
+```bash
+python3 cli.py
+python3 cli.py --backend http://localhost:3000
+python3 cli.py --backend http://localhost:3000 -- --help
+AGENT_SHIELD_BACKEND_URL=https://n73h8lxc41.execute-api.ap-southeast-1.amazonaws.com python3 cli.py
+```
+
+`npm` script wrappers:
+
+```bash
+npm run dev -- --help
+npm test
+```
+
+`package.json` does not add extra runtime behavior. The `npm` scripts are thin wrappers around the same Python entrypoints.
 
 ## CLI
 
-`python3 cli.py [--backend URL] [--verbose] [codex_args ...]`
+```bash
+python3 cli.py [--backend URL] [--verbose] [codex_args ...]
+```
 
-- `--backend`: backend API base URL (default: `AGENT_SHIELD_BACKEND_URL` or `http://localhost:3000`)
-- `--verbose` / `-v`: mirror interceptor logs to stderr (logs are always written to `AGENT_SHIELD_LOG_FILE`)
-- `codex_args`: forwarded to Codex invocation
+Arguments:
+- `--backend`: backend API base URL, overriding `AGENT_SHIELD_BACKEND_URL`
+- `--verbose` / `-v`: also mirror interceptor logs to stderr
+- `codex_args`: forwarded to the resolved Codex command
 
-Startup diagnostics:
-- The wrapper prints the active intercept mode.
-- The wrapper probes `GET /api/health` and warns if the configured backend is unreachable.
+Startup output:
+- Prints the backend URL and active intercept mode
+- Probes `GET /api/health` and prints either `Backend health: ok` or a warning
 
-Exit behavior:
-- Exit `0`: session `success` or `blocked`
-- Exit `1`: startup/runtime failure or interrupt
+Exit codes:
+- `0`: session completed with status `success` or `blocked`
+- `1`: startup failure, runtime error, or user interrupt
 
-## Environment variables
+## Configuration
 
-- `AGENT_SHIELD_OLLAMA_HOST` (default `http://localhost:11434`)
-- `AGENT_SHIELD_OLLAMA_MODEL` (default `qwen3.5:0.8b`)
-- `AGENT_SHIELD_BACKEND_URL` (default `http://localhost:3000`)
-- `AGENT_SHIELD_CODEX_COMMAND` (default `codex`, shell-split)
-- `AGENT_SHIELD_CODEX_ARGS` (default empty, shell-split)
-  - Legacy `--dangerously-skip-possible-errors` is automatically remapped to `--dangerously-bypass-approvals-and-sandbox`.
-- `AGENT_SHIELD_INTERCEPT_MODE` (`mcp-targets`, `process-tree`, or `strict`, default `process-tree`)
-- `AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC` (default `0.1`, minimum `0.05`)
-- `AGENT_SHIELD_LOG_FILE` (default `.agent-shield.log`)
-- `AGENT_SHIELD_RESPONSES_API_HOSTS` (comma-separated hostnames, default `api.openai.com`)
-- `AGENT_SHIELD_WHITELIST_HOSTS` (comma-separated hosts, case-insensitive)
-- `AGENT_SHIELD_WHITELIST_PORTS` (comma-separated ports)
-- `AGENT_SHIELD_WHITELIST_COMMAND_PATTERNS` (comma-separated command substrings, case-insensitive)
+### Core environment variables
+
+- `AGENT_SHIELD_OLLAMA_HOST`: Ollama base URL, default `http://localhost:11434`
+- `AGENT_SHIELD_OLLAMA_MODEL`: Ollama model name, default `qwen3.5:0.8b`
+- `AGENT_SHIELD_BACKEND_URL`: backend base URL, default `http://localhost:3000`
+- `AGENT_SHIELD_CODEX_COMMAND`: shell-split command used to start Codex, default `codex`
+- `AGENT_SHIELD_CODEX_ARGS`: default shell-split arguments passed to Codex
+
+Codex argument compatibility:
+- Legacy `--dangerously-skip-possible-errors` is automatically rewritten to `--dangerously-bypass-approvals-and-sandbox`
+- If `AGENT_SHIELD_CODEX_COMMAND` resolves to `codex` and no local binary exists, runtime falls back to `npx -y @openai/codex`
+
+### Interception tuning
+
+- `AGENT_SHIELD_INTERCEPT_MODE`: `mcp-targets`, `process-tree`, or `strict`
+- `AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC`: descendant scan cadence in seconds, default `0.1`, minimum `0.05`
+- `AGENT_SHIELD_RESPONSES_API_HOSTS`: comma-separated hostnames treated as model-provider API destinations, default `api.openai.com`
+
+### Logging and allowlists
+
+- `AGENT_SHIELD_LOG_FILE`: log path, default `.agent-shield.log`
+- `AGENT_SHIELD_WHITELIST_HOSTS`: comma-separated host allowlist, case-insensitive
+- `AGENT_SHIELD_WHITELIST_PORTS`: comma-separated numeric port allowlist
+- `AGENT_SHIELD_WHITELIST_COMMAND_PATTERNS`: comma-separated case-insensitive command substrings
 
 Whitelist behavior:
-- Backend URL and Ollama URL are auto-whitelisted (including localhost aliases) to prevent self-block loops.
-- For AWS deployment, the wrapper only needs `AgentShieldStack.ApiEndpoint`; `ClusterName`, `DatabaseEndpoint`, and `LoadBalancerDns` are backend/ops values, not wrapper config.
-- Explicit whitelist env vars extend the auto-whitelist.
+- Backend and Ollama endpoints are auto-whitelisted, including localhost aliases such as `localhost`, `127.0.0.1`, and `::1`
+- For non-local backend or Ollama hosts, resolved IP addresses are also auto-whitelisted so established TLS sockets still bypass interception after DNS resolution
+- Connection allowlisting checks both local and remote endpoints on each established socket, which prevents self-intercepts on the server side of backend or Ollama listener sockets
+- Explicit whitelist environment variables extend the auto-whitelist
+- Whitelisted commands skip process-spawn interception, and whitelisted endpoints skip connection interception
 
-Backend URL handling:
-- `AGENT_SHIELD_BACKEND_URL` can be either the API host root (`https://...execute-api...amazonaws.com`) or the `/api` path (`https://.../api`).
-- The client normalizes both forms so health, intercept, and session routes do not double-prefix `/api`.
+Monitoring scope:
+- The wrapper watches descendant process spawns and established TCP connections only
+- Connection inspection is based on `lsof`; there is no UDP or packet-level capture
+- `MCPProxyServer` exists as an optional helper for HTTP payload interception, but `cli.py` does not start it by default
+
+## Project layout
+
+- `cli.py`: command-line entrypoint and startup diagnostics
+- `config.py`: environment loading and configuration normalization
+- `.env-example`: example local wrapper configuration
+- `mcp_interceptor.py`: main process-tree monitor, connection classifier, and enforcement logic
+- `mcp_detector.py`: MCP-related string and command detection helpers
+- `risk_engine.py`: Ollama request and risk result normalization
+- `api_client.py`: backend health, intercept, polling, and session-result client
+- `tests/`: unit tests for config, backend client, risk parsing, and interceptor helpers
+- `BACKEND_API.md`: backend contract consumed by this wrapper
+
+## Testing
+
+Run the unit test suite with either command:
+
+```bash
+npm test
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+The current tests are mock-heavy unit tests. They validate configuration parsing, request shaping, intercept classification, and result handling, but they do not spin up a live Codex process, Ollama instance, or backend service.
 
 ## Backend API
 
-See `BACKEND_API.md` for request/response details, including the startup `GET /api/health` probe.
+See `BACKEND_API.md` for the exact request and response contract used by the wrapper.

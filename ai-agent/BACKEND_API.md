@@ -1,27 +1,33 @@
 # Backend API Contract (ai-agent Wrapper)
 
-This document describes the API contract used by the Python wrapper in this directory.
+This document describes the HTTP contract consumed by the Python wrapper in this directory.
 
-## Endpoints used by wrapper
+## Wrapper call sequence
 
-The wrapper directly calls:
-- `GET /api/health`
-- `POST /api/intercept`
-- `GET /api/intercept/:intercept_id`
-- `POST /api/session/result`
+For a normal session the wrapper interacts with the backend in this order:
 
-`/api/session/result` should exist, but wrapper execution does not fail if this call returns an error.
-`/api/health` is used as a startup diagnostic; an unhealthy or unreachable response only produces a warning.
+1. Optional startup probe: `GET /api/health`
+2. For each intercepted event:
+   - `POST /api/intercept`
+   - `GET /api/intercept/:intercept_id` until the decision is final
+3. Final best-effort report: `POST /api/session/result`
 
-Base URL note:
-- The wrapper accepts `AGENT_SHIELD_BACKEND_URL` with or without a trailing `/api`.
-- Requests are normalized so the client still calls the routes documented here without double-prefixing `/api`.
+Base URL normalization:
+- `AGENT_SHIELD_BACKEND_URL` may be configured either as the host root, for example `https://example.execute-api.ap-southeast-1.amazonaws.com`, or with a trailing `/api`
+- The client normalizes both forms so routes do not end up double-prefixed
+
+Request timeout behavior:
+- Each backend request uses a 5 second client timeout
+- All 2xx wrapper routes should return JSON objects; empty `204` responses are not compatible with the current client
+- Health failures only produce a warning
+- Intercept submission and decision polling are fail-closed
+- Session result reporting is best effort
 
 ## GET /api/health
 
 Startup connectivity probe.
 
-### Success response example
+Example success response:
 
 ```json
 {
@@ -29,15 +35,16 @@ Startup connectivity probe.
 }
 ```
 
-Rules expected by wrapper:
-- Any 2xx JSON response with `status` is treated as healthy.
-- Non-2xx responses, invalid JSON, and network failures are reported as warnings only; startup continues.
+Wrapper expectations:
+- Return a 2xx JSON object, typically `{ "status": "ok" }`
+- The wrapper reads `status` when present and falls back to `"ok"` if it is omitted
+- Non-2xx responses, invalid JSON, and network failures only produce a startup warning
 
 ## POST /api/intercept
 
-Submit one intercept event for approval.
+Submit one intercepted runtime event for human or policy approval.
 
-### Request
+Example request:
 
 ```json
 {
@@ -57,18 +64,24 @@ Submit one intercept event for approval.
 }
 ```
 
-### `action_type` values used by wrapper
+Request field notes:
+- `session_id`: UUID generated once when the wrapper starts
+- `agent`: currently `"codex"`
+- `action_type`: classification assigned by the interceptor
+- `content`: either the intercepted command line or a `local_endpoint->remote_endpoint` string for connections
+- `risk`: normalized Ollama output plus `latency_ms`
 
+`action_type` values currently emitted by the wrapper:
 - `mcp_process_spawn`: command matches MCP detector patterns
-- `mcp_shell_target_access`: command references configured MCP host/port or known MCP proxy port
+- `mcp_shell_target_access`: command references a configured MCP host or port, or a known proxy port
 - `child_process_spawn`: non-whitelisted child process spawn in `process-tree` mode
 - `shell_process_spawn`: strict-mode shell spawn intercept
 - `mcp_connection_attempt`: MCP-related network connection intercept
-- `responses_api_connection_attempt`: root Codex HTTPS connection classified as model-provider API traffic
+- `responses_api_connection_attempt`: root Codex HTTPS connection classified as model-provider traffic
 - `agent_connection_attempt`: non-whitelisted network connection in `process-tree` or `strict` mode
-- `mcp_http_payload`: proxy payload intercept (only if `MCPProxyServer` path is used)
+- `mcp_http_payload`: proxy payload intercept, only when the optional `MCPProxyServer` path is used
 
-### Success response (2xx)
+Example success response:
 
 ```json
 {
@@ -77,18 +90,16 @@ Submit one intercept event for approval.
 }
 ```
 
-Rules expected by wrapper:
-- `intercept_id` must be present to start decision polling.
-- If response is non-2xx, wrapper treats submission as error and defaults to `deny`.
-- If response is 2xx but `intercept_id` is missing, wrapper also defaults to `deny`.
-
----
+Wrapper expectations:
+- A 2xx success response must be JSON and include `intercept_id`
+- If `intercept_id` is missing, the wrapper treats the event as denied
+- Any non-2xx response is treated as a submission failure and therefore as a deny
 
 ## GET /api/intercept/:intercept_id
 
-Poll for a decision on an intercept.
+Poll for a final decision on an intercept.
 
-### Pending response example
+Example pending response:
 
 ```json
 {
@@ -98,7 +109,7 @@ Poll for a decision on an intercept.
 }
 ```
 
-### Decided response example
+Example decided response:
 
 ```json
 {
@@ -108,19 +119,18 @@ Poll for a decision on an intercept.
 }
 ```
 
-Rules expected by wrapper:
-- `decision` must be either `"approve"` or `"deny"` to stop polling.
-- Poll cadence: every `0.5s`, up to `60` attempts (~30 seconds).
-- Non-2xx responses and invalid JSON are treated as transient polling failures (continue polling).
-- If polling never yields `approve`/`deny`, wrapper defaults to `deny`.
-
----
+Wrapper expectations:
+- `decision` must be exactly `"approve"` or `"deny"` to stop polling
+- Poll cadence is every `0.5` seconds for up to `60` attempts, or about 30 seconds total
+- Non-2xx responses, invalid JSON, and transient network failures are ignored and polling continues
+- If polling never returns a final decision, the wrapper defaults to `deny`
+- Additional fields such as `reason` are allowed and ignored by the wrapper
 
 ## POST /api/session/result
 
-Report final wrapper session result.
+Report the final session outcome after Codex exits or the wrapper fails.
 
-### Request
+Example request:
 
 ```json
 {
@@ -134,19 +144,30 @@ Report final wrapper session result.
       "timestamp": "2026-03-20T10:30:00.000000",
       "event_type": "network_connection",
       "content_preview": "127.0.0.1:54000->127.0.0.1:3001",
+      "action_type": "mcp_connection_attempt",
+      "process_pid": 12345,
+      "process_type": "mcp_connection",
+      "process_role": "child",
+      "connection_scope": "local",
       "detection_reason": "configured_mcp_port"
     }
   ]
 }
 ```
 
-### `status` values
+`status` values:
+- `success`: Codex exited with code `0` and no denied intercepts occurred
+- `blocked`: at least one intercept was denied
+- `failed`: wrapper startup failed or Codex exited non-zero
 
-- `success`: Codex exited with code `0` and no denied intercepts
-- `blocked`: at least one deny decision occurred
-- `failed`: startup error or non-zero Codex exit
+Intercept object notes:
+- Every intercept includes core fields such as `intercept_id`, `decision`, `risk_level`, `timestamp`, and `content_preview`
+- Process events include fields such as `process_pid`, `process_type`, `event_type=process_spawn`, `action_type`, and `detection_reason`
+- Connection events include fields such as `process_role`, `connection_scope`, `event_type=network_connection`, `action_type`, and `detection_reason`
+- `content_preview` is truncated by the wrapper to 100 characters before reporting
+- `timestamp` is generated with `datetime.utcnow().isoformat()` and therefore has no timezone suffix
 
-### Success response (2xx)
+Example success response:
 
 ```json
 {
@@ -155,29 +176,28 @@ Report final wrapper session result.
 }
 ```
 
-Notes:
-- Intercept objects can include additional fields such as `event_type`, `action_type`, `process_pid`, `process_type`, `connection_scope`, and `detection_reason`.
-- Wrapper does not retry this endpoint and does not change already-computed session status if this call fails.
+Wrapper expectations:
+- Any 2xx JSON response is acceptable
+- The wrapper does not retry this call
+- A failure here does not change the already computed wrapper exit status
 
----
+## Failure semantics
 
-## Wrapper failure semantics
+The wrapper is intentionally fail-closed for intercept decisions:
+- Intercept submission failure, including network error or non-2xx response, results in `deny`
+- Missing `intercept_id` from the submit response results in `deny`
+- Decision polling timeout results in `deny`
 
-The client behaves fail-closed for intercept decisions:
-- Intercept submission failure (network/HTTP/non-2xx) => deny.
-- Missing `intercept_id` from submit response => deny.
-- Decision polling timeout or unresolved polling failures => deny.
+This means backend instability can block agent activity by design.
 
-This means backend instability can block MCP-related operations by design.
+## Optional or compatibility endpoints
 
----
-
-## Optional endpoints (Dashboard/Admin)
-
-The wrapper does not call these directly, but they are commonly useful:
-
+The wrapper does not require these routes, but they are commonly useful for dashboards, admin tooling, or service discovery:
+- `GET /api`
 - `PUT /api/intercept/:intercept_id/decision`
 - `GET /api/session/:session_id`
 - `GET /api/intercepts`
-- `GET /api/health`
 - `DELETE /api/intercept/:intercept_id`
+
+Compatibility note:
+- The current wrapper contract requires `GET /api/health`, `POST /api/intercept`, `GET /api/intercept/:intercept_id`, and `POST /api/session/result`

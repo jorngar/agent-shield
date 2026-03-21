@@ -58,13 +58,15 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
 
         is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
             cmdline="python worker.py",
+            local_host="10.0.0.1",
+            local_port="54000",
             remote_host="mcp.example.com",
             remote_port="443",
         )
 
         self.assertTrue(is_candidate)
         self.assertEqual(action_type, "mcp_connection_attempt")
-        self.assertEqual(reason, "configured_mcp_host")
+        self.assertEqual(reason, "configured_mcp_target")
         self.assertEqual(metadata["type"], "mcp_connection")
 
     def test_command_references_mcp_target_endpoint(self):
@@ -125,6 +127,8 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
 
         is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
             cmdline="python worker.py",
+            local_host="127.0.0.1",
+            local_port="54000",
             remote_host="127.0.0.1",
             remote_port="11434",
         )
@@ -149,12 +153,39 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
             )
         )
 
+    def test_whitelisted_connection_skips_local_ollama_server_side_socket(self):
+        interceptor = MCPInterceptor()
+        connection = {
+            "local_endpoint": "localhost:11434",
+            "remote_endpoint": "localhost:50351",
+            "local_host": "localhost",
+            "local_port": "11434",
+            "remote_host": "localhost",
+            "remote_port": "50351",
+        }
+
+        self.assertTrue(interceptor._is_whitelisted_connection(connection))
+
+    @patch("mcp_interceptor.socket.getaddrinfo")
+    def test_backend_hostname_resolution_is_added_to_whitelist(self, mock_getaddrinfo):
+        mock_getaddrinfo.return_value = [
+            (0, 0, 0, "", ("18.97.36.76", 0)),
+        ]
+
+        interceptor = MCPInterceptor(
+            backend_url="https://n73h8lxc41.execute-api.ap-southeast-1.amazonaws.com"
+        )
+
+        self.assertTrue(interceptor._is_whitelisted_endpoint("18.97.36.76", 443))
+
     def test_root_codex_responses_api_connection_is_intercepted(self):
         interceptor = MCPInterceptor()
         interceptor._intercept_mode = "process-tree"
 
         is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
             cmdline="codex",
+            local_host="10.0.0.10",
+            local_port="54000",
             remote_host="104.18.3.2",
             remote_port="443",
             process_role="root",
@@ -172,6 +203,8 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
 
         is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
             cmdline="npx @playwright/mcp",
+            local_host="10.0.0.10",
+            local_port="54000",
             remote_host="registry.npmjs.org",
             remote_port="443",
             process_role="child",
@@ -181,6 +214,24 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
         self.assertEqual(action_type, "agent_connection_attempt")
         self.assertEqual(reason, "child_process_tree_connection")
         self.assertEqual(metadata["type"], "agent_connection")
+
+    def test_process_tree_mode_skips_generic_local_loopback_ipc(self):
+        interceptor = MCPInterceptor()
+        interceptor._intercept_mode = "process-tree"
+
+        is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
+            cmdline="codex",
+            local_host="127.0.0.1",
+            local_port="63468",
+            remote_host="127.0.0.1",
+            remote_port="52942",
+            process_role="root",
+        )
+
+        self.assertFalse(is_candidate)
+        self.assertEqual(action_type, "")
+        self.assertEqual(reason, "local_internal_connection")
+        self.assertEqual(metadata, {})
 
     def test_build_monitored_connection_pid_set_includes_root_process(self):
         monitored = MCPInterceptor._build_monitored_connection_pid_set(
@@ -236,6 +287,57 @@ class MCPInterceptorSessionTests(unittest.TestCase):
         result = asyncio.run(interceptor.report_session(codex_exit_code=0))
 
         self.assertEqual(result["status"], "blocked")
+
+
+class MCPInterceptorAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inspect_connections_dedupes_same_socket_across_process_tree(self):
+        interceptor = MCPInterceptor()
+        interceptor._loop = asyncio.get_running_loop()
+        interceptor._running = True
+        interceptor._schedule_coroutine_threadsafe = Mock(
+            side_effect=lambda coro, label: (coro.close(), None)[1]
+        )
+
+        connection = {
+            "local_endpoint": "10.0.0.10:54000",
+            "remote_endpoint": "104.18.3.2:443",
+            "local_host": "10.0.0.10",
+            "local_port": "54000",
+            "remote_host": "104.18.3.2",
+            "remote_port": "443",
+        }
+
+        with patch.object(
+            interceptor,
+            "_get_process_args",
+            side_effect=["codex", "node helper"],
+        ), patch.object(
+            interceptor,
+            "_inspect_process_network",
+            return_value={"established_connections": [connection]},
+        ):
+            interceptor._inspect_connections_for_pids(root_pid=10, pids={10, 11})
+
+        interceptor._schedule_coroutine_threadsafe.assert_called_once()
+
+    async def test_drain_scheduled_futures_cancels_pending_tasks(self):
+        interceptor = MCPInterceptor()
+        interceptor._loop = asyncio.get_running_loop()
+        interceptor._running = True
+        started = asyncio.Event()
+
+        async def sleeper():
+            started.set()
+            await asyncio.sleep(10)
+
+        future = interceptor._schedule_coroutine_threadsafe(sleeper(), label="test")
+        self.assertIsNotNone(future)
+        await started.wait()
+
+        await interceptor._drain_scheduled_futures(timeout=0.5)
+
+        self.assertTrue(future.done() or future.cancelled())
+        self.assertFalse(interceptor._scheduled_futures)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 import asyncio
+import concurrent.futures
 import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -19,6 +21,7 @@ from config import (
     INTERCEPTABLE_PORTS,
     INTERCEPT_MODE,
     LOG_FILE,
+    MAX_CONCURRENT_INTERCEPTS,
     OLLAMA_HOST,
     PROCESS_SCAN_INTERVAL_SEC,
     RESPONSES_API_HOSTS,
@@ -48,7 +51,6 @@ class MCPInterceptor:
     ):
         self.agent_name = agent_name
         self.session_id = str(uuid.uuid4())
-        self.backend_client = BackendClient(backend_url)
         self.mcp_detector = create_mcp_detector()
         self.process: Optional[subprocess.Popen] = None
         self.intercepts: List[Dict[str, Any]] = []
@@ -56,8 +58,10 @@ class MCPInterceptor:
         self.approved_count = 0
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._process_thread: Optional[threading.Thread] = None
         self._seen_pids: Set[int] = set()
         self._seen_connections: Set[Tuple[int, str, str]] = set()
+        self._seen_connection_signatures: Set[Tuple[str, str]] = set()
         self._mcp_target_hosts: Set[str] = set()
         self._mcp_target_ports: Set[int] = set()
         self._responses_api_hosts: Set[str] = set(RESPONSES_API_HOSTS)
@@ -65,12 +69,17 @@ class MCPInterceptor:
         self._verbose = verbose
         self._log_lock = threading.Lock()
         self._log_file_path = LOG_FILE or ".agent-shield.log"
+        self._scheduled_futures: Set[concurrent.futures.Future] = set()
+        self._scheduled_futures_lock = threading.Lock()
+        self._intercept_semaphore: Optional[asyncio.Semaphore] = None
         (
             self._whitelist_hosts,
             self._whitelist_ports,
             self._whitelist_endpoints,
         ) = self._build_endpoint_whitelist(backend_url=backend_url, ollama_url=OLLAMA_HOST)
         self._whitelist_command_patterns = set(WHITELIST_COMMAND_PATTERNS)
+        self.backend_client = BackendClient(backend_url)
+        self.backend_client.debug_hook = self._log_backend_event
 
     async def run(self, codex_args: List[str] = None, working_dir: str = ".") -> Dict:
         """
@@ -85,6 +94,7 @@ class MCPInterceptor:
 
         self._running = True
         self._loop = asyncio.get_running_loop()
+        self._intercept_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INTERCEPTS)
         spawn_env = dict(os.environ)
         if spawn_env.get("TERM", "").strip().lower() == "dumb":
             spawn_env["TERM"] = "xterm-256color"
@@ -112,6 +122,7 @@ class MCPInterceptor:
         process_thread = threading.Thread(
             target=self._monitor_process_spawns, daemon=True
         )
+        self._process_thread = process_thread
 
         if self.process.stdout is not None:
             stdout_thread = threading.Thread(target=self._monitor_stdout, daemon=True)
@@ -123,13 +134,17 @@ class MCPInterceptor:
 
         exit_code = None
         try:
-            # Do not block the event loop while Codex is running.
-            exit_code = await asyncio.to_thread(self.process.wait)
+            exit_code = await self._wait_for_process_exit()
         except KeyboardInterrupt:
             self.stop()
             exit_code = 130
         finally:
             self._running = False
+            if self._process_thread:
+                self._process_thread.join(timeout=max(PROCESS_SCAN_INTERVAL_SEC * 2, 0.2))
+            await self._drain_scheduled_futures()
+            self._intercept_semaphore = None
+            self._loop = None
 
         return await self.report_session(codex_exit_code=exit_code)
 
@@ -297,8 +312,22 @@ class MCPInterceptor:
 
             for alias in self._host_aliases(parsed.hostname):
                 endpoints.add((alias, port))
+            for resolved_host in self._resolve_host_addresses(parsed.hostname):
+                endpoints.add((resolved_host, port))
 
         return hosts, ports, endpoints
+
+    @staticmethod
+    def _resolve_host_addresses(hostname: str) -> Set[str]:
+        resolved: Set[str] = set()
+        try:
+            for result in socket.getaddrinfo(hostname, None):
+                address = result[4][0].strip().lower()
+                if address:
+                    resolved.add(address)
+        except socket.gaierror:
+            return resolved
+        return resolved
 
     def _is_whitelisted_endpoint(self, host: str, port: Optional[int]) -> bool:
         host_aliases = self._host_aliases(host) if host else set()
@@ -311,6 +340,66 @@ class MCPInterceptor:
         if port is not None and port in self._whitelist_ports:
             return True
         return False
+
+    def _is_whitelisted_connection(self, connection: Dict[str, str]) -> bool:
+        endpoint_pairs = [
+            (connection.get("local_host", ""), connection.get("local_port", "")),
+            (connection.get("remote_host", ""), connection.get("remote_port", "")),
+        ]
+
+        for host, raw_port in endpoint_pairs:
+            try:
+                parsed_port = int(raw_port)
+            except (TypeError, ValueError):
+                parsed_port = None
+            if self._is_whitelisted_endpoint(host, parsed_port):
+                return True
+
+        return False
+
+    @staticmethod
+    def _parse_port(raw_port: Any) -> Optional[int]:
+        try:
+            parsed_port = int(raw_port)
+        except (TypeError, ValueError):
+            return None
+        if 1 <= parsed_port <= 65535:
+            return parsed_port
+        return None
+
+    def _matches_intercept_target(self, host: str, port: Optional[int]) -> bool:
+        host_aliases = self._host_aliases(host) if host else set()
+        if host_aliases & self._mcp_target_hosts:
+            return True
+        if port is not None and (
+            port in self._mcp_target_ports or port in INTERCEPTABLE_PORTS
+        ):
+            return True
+        return False
+
+    def _should_skip_local_ipc_connection(
+        self,
+        cmdline: str,
+        local_host: str,
+        local_port: Optional[int],
+        remote_host: str,
+        remote_port: Optional[int],
+    ) -> bool:
+        if not (
+            self._is_local_host(local_host or "") and self._is_local_host(remote_host or "")
+        ):
+            return False
+
+        is_mcp_process, _, _ = self.mcp_detector.scan_content(cmdline)
+        if is_mcp_process:
+            return False
+
+        if self._matches_intercept_target(local_host, local_port):
+            return False
+        if self._matches_intercept_target(remote_host, remote_port):
+            return False
+
+        return True
 
     def _is_whitelisted_command(self, cmdline: str) -> bool:
         lowered = cmdline.lower()
@@ -329,6 +418,79 @@ class MCPInterceptor:
 
         if self._verbose or force_console:
             print(f"[AgentShield] {message}", file=sys.stderr, flush=True)
+
+    def _log_backend_event(self, message: str) -> None:
+        self._log(f"[BackendClient] {message}", level="DEBUG")
+
+    async def _wait_for_process_exit(self) -> Optional[int]:
+        while self.process and self.process.poll() is None:
+            await asyncio.sleep(0.1)
+        if not self.process:
+            return None
+        return self.process.poll()
+
+    async def _drain_scheduled_futures(self, timeout: float = 1.0) -> None:
+        with self._scheduled_futures_lock:
+            scheduled = list(self._scheduled_futures)
+
+        if not scheduled:
+            return
+
+        pending = [future for future in scheduled if not future.done()]
+        for future in pending:
+            future.cancel()
+
+        wrapped = [asyncio.wrap_future(future) for future in pending]
+        if not wrapped:
+            return
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*wrapped, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            self._log(
+                f"Timed out draining {len(wrapped)} scheduled intercept task(s)",
+                level="DEBUG",
+            )
+
+    def _schedule_coroutine_threadsafe(
+        self, coro: Any, label: str
+    ) -> Optional[concurrent.futures.Future]:
+        loop = self._loop
+        if not self._running or not loop or loop.is_closed():
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError as exc:
+            self._log(f"Skipped scheduling {label}: {exc}", level="DEBUG")
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return None
+
+        with self._scheduled_futures_lock:
+            self._scheduled_futures.add(future)
+
+        def _consume_result(done_future: concurrent.futures.Future) -> None:
+            with self._scheduled_futures_lock:
+                self._scheduled_futures.discard(done_future)
+            try:
+                done_future.result()
+            except concurrent.futures.CancelledError:
+                return
+            except Exception as exc:
+                self._log(f"Background task {label} failed: {exc}", level="ERROR")
+
+        future.add_done_callback(_consume_result)
+        return future
 
     @classmethod
     def _extract_endpoints_from_text(cls, text: str) -> List[Tuple[str, int]]:
@@ -521,7 +683,7 @@ class MCPInterceptor:
 
         try:
             established_out = subprocess.check_output(
-                ["lsof", "-P", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED"],
+                ["lsof", "-nP", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED"],
                 text=True,
             )
         except subprocess.CalledProcessError:
@@ -553,14 +715,14 @@ class MCPInterceptor:
     def _classify_connection_candidate(
         self,
         cmdline: str,
+        local_host: str,
+        local_port: str,
         remote_host: str,
         remote_port: str,
         process_role: str = "child",
     ) -> Tuple[bool, str, str, Dict[str, Any]]:
-        try:
-            parsed_port = int(remote_port)
-        except (TypeError, ValueError):
-            parsed_port = None
+        parsed_local_port = self._parse_port(local_port)
+        parsed_port = self._parse_port(remote_port)
 
         if self._is_whitelisted_endpoint(remote_host, parsed_port):
             return False, "", "whitelisted_endpoint", {}
@@ -578,11 +740,11 @@ class MCPInterceptor:
                 },
             )
 
-        if remote_host and remote_host.lower() in self._mcp_target_hosts:
+        if self._matches_intercept_target(remote_host, parsed_port):
             return (
                 True,
                 "mcp_connection_attempt",
-                "configured_mcp_host",
+                "configured_mcp_target",
                 {
                     "type": "mcp_connection",
                     "process_role": process_role,
@@ -590,11 +752,11 @@ class MCPInterceptor:
                 },
             )
 
-        if parsed_port is not None and parsed_port in self._mcp_target_ports:
+        if self._matches_intercept_target(local_host, parsed_local_port):
             return (
                 True,
                 "mcp_connection_attempt",
-                "configured_mcp_port",
+                "configured_local_mcp_target",
                 {
                     "type": "mcp_connection",
                     "process_role": process_role,
@@ -602,17 +764,14 @@ class MCPInterceptor:
                 },
             )
 
-        if parsed_port is not None and parsed_port in INTERCEPTABLE_PORTS:
-            return (
-                True,
-                "mcp_connection_attempt",
-                "known_mcp_proxy_port",
-                {
-                    "type": "mcp_connection",
-                    "process_role": process_role,
-                    "severity": "high",
-                },
-            )
+        if self._should_skip_local_ipc_connection(
+            cmdline=cmdline,
+            local_host=local_host,
+            local_port=parsed_local_port,
+            remote_host=remote_host,
+            remote_port=parsed_port,
+        ):
+            return False, "", "local_internal_connection", {}
 
         looks_like_responses_api, responses_reason = (
             self._looks_like_responses_api_connection(
@@ -675,6 +834,15 @@ class MCPInterceptor:
         final_decision = "deny"
         intercept_id = None
 
+        self._log(
+            "Intercept submission start: "
+            f"action_type={action_type}; "
+            f"content_preview={content[:120]}; "
+            f"risk_level={risk.get('risk_level')}; "
+            f"recommended_action={risk.get('recommended_action')}",
+            level="DEBUG",
+        )
+
         result = await self.backend_client.submit_intercept(
             session_id=self.session_id,
             agent=self.agent_name,
@@ -684,9 +852,36 @@ class MCPInterceptor:
         )
 
         intercept_id = result.get("intercept_id")
+        self._log(
+            "Intercept submission end: "
+            f"action_type={action_type}; "
+            f"intercept_id={intercept_id}; "
+            f"status={result.get('status')}; "
+            f"http_status={result.get('http_status')}; "
+            f"request_url={result.get('request_url')}; "
+            f"error={result.get('error')}",
+            level="DEBUG",
+        )
         if intercept_id:
+            self._log(
+                f"Decision polling start: intercept_id={intercept_id}",
+                level="DEBUG",
+            )
             decision = await self.backend_client.poll_decision(intercept_id)
             final_decision = decision.get("decision", "deny")
+            self._log(
+                "Decision polling end: "
+                f"intercept_id={intercept_id}; "
+                f"decision={final_decision}; "
+                f"request_url={decision.get('request_url')}; "
+                f"timeout={decision.get('timeout', False)}",
+                level="DEBUG",
+            )
+        else:
+            self._log(
+                f"Intercept submission produced no intercept_id; defaulting to {final_decision}",
+                level="WARNING",
+            )
 
         return intercept_id, final_decision
 
@@ -717,7 +912,7 @@ class MCPInterceptor:
                         metadata,
                     ) = self._classify_process_spawn(cmdline)
                     if should_intercept:
-                        asyncio.run_coroutine_threadsafe(
+                        self._schedule_coroutine_threadsafe(
                             self._handle_process_spawn(
                                 pid=pid,
                                 cmdline=cmdline,
@@ -725,7 +920,7 @@ class MCPInterceptor:
                                 detection_reason=detection_reason,
                                 metadata=metadata,
                             ),
-                            self._loop,
+                            label=f"process_spawn:{pid}",
                         )
                         self._seen_pids.add(pid)
 
@@ -757,6 +952,18 @@ class MCPInterceptor:
                     continue
 
                 self._seen_connections.add(key)
+                signature = (conn["local_endpoint"], conn["remote_endpoint"])
+                if signature in self._seen_connection_signatures:
+                    continue
+                self._seen_connection_signatures.add(signature)
+                if self._is_whitelisted_connection(conn):
+                    self._log(
+                        "Skipping whitelisted connection: "
+                        f"pid={pid}; role={process_role}; "
+                        f"{conn['local_endpoint']} -> {conn['remote_endpoint']}",
+                        level="DEBUG",
+                    )
+                    continue
                 (
                     is_candidate,
                     action_type,
@@ -764,6 +971,8 @@ class MCPInterceptor:
                     metadata,
                 ) = self._classify_connection_candidate(
                     cmdline=cmdline,
+                    local_host=conn["local_host"],
+                    local_port=conn["local_port"],
                     remote_host=conn["remote_host"],
                     remote_port=conn["remote_port"],
                     process_role=process_role,
@@ -771,7 +980,7 @@ class MCPInterceptor:
                 if not is_candidate:
                     continue
 
-                asyncio.run_coroutine_threadsafe(
+                self._schedule_coroutine_threadsafe(
                     self._handle_connection_intercept(
                         pid=pid,
                         cmdline=cmdline,
@@ -781,7 +990,7 @@ class MCPInterceptor:
                         metadata=metadata,
                         process_role=process_role,
                     ),
-                    self._loop,
+                    label=f"connection:{pid}:{conn['remote_endpoint']}",
                 )
 
     async def _handle_process_spawn(
@@ -792,51 +1001,63 @@ class MCPInterceptor:
         detection_reason: str,
         metadata: Dict[str, Any],
     ) -> None:
-        self._log(f"Process spawn intercepted (PID: {pid})")
-        self._log(f"Command: {cmdline[:200]}...", level="DEBUG")
+        semaphore = self._intercept_semaphore
+        if semaphore is None:
+            return
 
-        network_info = await asyncio.to_thread(self._inspect_process_network, pid)
-        risk = await asyncio.to_thread(
-            analyze_risk,
-            self.agent_name,
-            action_type,
-            cmdline,
-            (
-                f"detection_reason={detection_reason}; "
-                f"classification={metadata.get('type', 'unknown')}; "
-                f"listening_ports={network_info.get('listening_ports', [])}; "
-                f"established_connections={network_info.get('established_connections', [])}; "
-                f"listen_raw_preview={network_info.get('listen_raw_preview', [''])[0]}; "
-                f"established_raw_preview={network_info.get('established_raw_preview', [''])[0]}"
-            ),
-        )
+        async with semaphore:
+            self._log(
+                f"Process spawn intercepted start (PID: {pid}, action_type={action_type}, reason={detection_reason})"
+            )
+            self._log(f"Command: {cmdline[:200]}...", level="DEBUG")
 
-        intercept_id, final_decision = await self._submit_intercept_for_decision(
-            action_type=action_type, content=cmdline, risk=risk
-        )
+            network_info = await asyncio.to_thread(self._inspect_process_network, pid)
+            risk = await asyncio.to_thread(
+                analyze_risk,
+                self.agent_name,
+                action_type,
+                cmdline,
+                (
+                    f"detection_reason={detection_reason}; "
+                    f"classification={metadata.get('type', 'unknown')}; "
+                    f"listening_ports={network_info.get('listening_ports', [])}; "
+                    f"established_connections={network_info.get('established_connections', [])}; "
+                    f"listen_raw_preview={network_info.get('listen_raw_preview', [''])[0]}; "
+                    f"established_raw_preview={network_info.get('established_raw_preview', [''])[0]}"
+                ),
+            )
 
-        if final_decision == "deny":
-            self._log(f"BLOCKED - {risk.get('summary')}")
-            self.blocked_count += 1
-            await asyncio.to_thread(self._kill_process_tree, pid)
-        else:
-            self._log("APPROVED")
-            self.approved_count += 1
+            intercept_id, final_decision = await self._submit_intercept_for_decision(
+                action_type=action_type, content=cmdline, risk=risk
+            )
 
-        self.intercepts.append(
-            {
-                "intercept_id": intercept_id,
-                "decision": final_decision,
-                "risk_level": risk.get("risk_level"),
-                "timestamp": datetime.utcnow().isoformat(),
-                "content_preview": cmdline[:100],
-                "process_pid": pid,
-                "process_type": metadata.get("type", "unknown"),
-                "event_type": "process_spawn",
-                "action_type": action_type,
-                "detection_reason": detection_reason,
-            }
-        )
+            if final_decision == "deny":
+                self._log(f"BLOCKED - {risk.get('summary')}")
+                self.blocked_count += 1
+                await asyncio.to_thread(self._kill_process_tree, pid)
+            else:
+                self._log("APPROVED")
+                self.approved_count += 1
+
+            self._log(
+                f"Process spawn intercepted end (PID: {pid}, action_type={action_type}, decision={final_decision}, intercept_id={intercept_id})",
+                level="DEBUG",
+            )
+
+            self.intercepts.append(
+                {
+                    "intercept_id": intercept_id,
+                    "decision": final_decision,
+                    "risk_level": risk.get("risk_level"),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "content_preview": cmdline[:100],
+                    "process_pid": pid,
+                    "process_type": metadata.get("type", "unknown"),
+                    "event_type": "process_spawn",
+                    "action_type": action_type,
+                    "detection_reason": detection_reason,
+                }
+            )
 
     async def _handle_connection_intercept(
         self,
@@ -848,62 +1069,72 @@ class MCPInterceptor:
         metadata: Dict[str, Any],
         process_role: str,
     ) -> None:
-        local_endpoint = connection.get("local_endpoint", "")
-        remote_endpoint = connection.get("remote_endpoint", "")
-        remote_host = connection.get("remote_host", "")
-        connection_scope = "local" if self._is_local_host(remote_host) else "remote"
+        semaphore = self._intercept_semaphore
+        if semaphore is None:
+            return
 
-        self._log(
-            f"Connection intercepted ({action_type}, PID: {pid}, role={process_role}, {connection_scope}): "
-            f"{local_endpoint} -> {remote_endpoint}"
-        )
+        async with semaphore:
+            local_endpoint = connection.get("local_endpoint", "")
+            remote_endpoint = connection.get("remote_endpoint", "")
+            remote_host = connection.get("remote_host", "")
+            connection_scope = "local" if self._is_local_host(remote_host) else "remote"
 
-        risk = await asyncio.to_thread(
-            analyze_risk,
-            self.agent_name,
-            action_type,
-            remote_endpoint,
-            (
-                f"pid={pid}; process_role={process_role}; reason={detection_reason}; "
-                f"classification={metadata.get('type', 'unknown')}; scope={connection_scope}; "
-                f"local_endpoint={local_endpoint}; remote_endpoint={remote_endpoint}; "
-                f"process_cmd={cmdline[:500]}"
-            ),
-        )
+            self._log(
+                f"Connection intercepted start ({action_type}, PID: {pid}, role={process_role}, {connection_scope}): "
+                f"{local_endpoint} -> {remote_endpoint}"
+            )
 
-        intercept_id, final_decision = await self._submit_intercept_for_decision(
-            action_type=action_type,
-            content=f"{local_endpoint}->{remote_endpoint}",
-            risk=risk,
-        )
+            risk = await asyncio.to_thread(
+                analyze_risk,
+                self.agent_name,
+                action_type,
+                remote_endpoint,
+                (
+                    f"pid={pid}; process_role={process_role}; reason={detection_reason}; "
+                    f"classification={metadata.get('type', 'unknown')}; scope={connection_scope}; "
+                    f"local_endpoint={local_endpoint}; remote_endpoint={remote_endpoint}; "
+                    f"process_cmd={cmdline[:500]}"
+                ),
+            )
 
-        if final_decision == "deny":
-            self._log(f"BLOCKED connection - {risk.get('summary')}")
-            self.blocked_count += 1
-            await asyncio.to_thread(self._kill_process_tree, pid)
-        else:
-            self._log("APPROVED connection")
-            self.approved_count += 1
+            intercept_id, final_decision = await self._submit_intercept_for_decision(
+                action_type=action_type,
+                content=f"{local_endpoint}->{remote_endpoint}",
+                risk=risk,
+            )
 
-        self.intercepts.append(
-            {
-                "intercept_id": intercept_id,
-                "decision": final_decision,
-                "risk_level": risk.get("risk_level"),
-                "timestamp": datetime.utcnow().isoformat(),
-                "content_preview": f"{local_endpoint}->{remote_endpoint}"[:100],
-                "process_pid": pid,
-                "process_type": metadata.get("type", "connection"),
-                "event_type": "network_connection",
-                "connection_scope": connection_scope,
-                "process_role": process_role,
-                "action_type": action_type,
-                "detection_reason": detection_reason,
-            }
-        )
+            if final_decision == "deny":
+                self._log(f"BLOCKED connection - {risk.get('summary')}")
+                self.blocked_count += 1
+                await asyncio.to_thread(self._kill_process_tree, pid)
+            else:
+                self._log("APPROVED connection")
+                self.approved_count += 1
+
+            self._log(
+                f"Connection intercepted end ({action_type}, PID: {pid}, role={process_role}, decision={final_decision}, intercept_id={intercept_id})",
+                level="DEBUG",
+            )
+
+            self.intercepts.append(
+                {
+                    "intercept_id": intercept_id,
+                    "decision": final_decision,
+                    "risk_level": risk.get("risk_level"),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "content_preview": f"{local_endpoint}->{remote_endpoint}"[:100],
+                    "process_pid": pid,
+                    "process_type": metadata.get("type", "connection"),
+                    "event_type": "network_connection",
+                    "connection_scope": connection_scope,
+                    "process_role": process_role,
+                    "action_type": action_type,
+                    "detection_reason": detection_reason,
+                }
+            )
 
     async def _handle_mcp_attempt(self, content: str) -> None:
-        self._log("MCP HTTP proxy payload detected")
+        self._log("MCP HTTP proxy payload detected start")
 
         mcp_info = self.mcp_detector.detect(content) or {"type": "unknown"}
         risk = await asyncio.to_thread(
@@ -922,6 +1153,11 @@ class MCPInterceptor:
             self.blocked_count += 1
         else:
             self.approved_count += 1
+
+        self._log(
+            f"MCP HTTP proxy payload detected end (decision={final_decision}, intercept_id={intercept_id})",
+            level="DEBUG",
+        )
 
         self.intercepts.append(
             {
@@ -990,16 +1226,15 @@ class MCPProxyServer:
         import socketserver
 
         interceptor = self.interceptor
-        loop = asyncio.get_running_loop()
-
         class MCPProxyHandler(http.server.BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 content_length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(content_length)
                 body_str = body.decode("utf-8", errors="ignore")
 
-                asyncio.run_coroutine_threadsafe(
-                    interceptor._handle_mcp_attempt(body_str), loop
+                interceptor._schedule_coroutine_threadsafe(
+                    interceptor._handle_mcp_attempt(body_str),
+                    label="proxy_payload",
                 )
 
                 self.send_response(202)

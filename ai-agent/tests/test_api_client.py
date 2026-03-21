@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import unittest
+from typing import List, Union
 from unittest.mock import patch
 
 import httpx
@@ -12,8 +13,11 @@ from api_client import BackendClient
 
 
 class FakeAsyncClient:
-    def __init__(self, response: httpx.Response):
-        self.response = response
+    def __init__(self, response: Union[httpx.Response, List[httpx.Response]]):
+        if isinstance(response, list):
+            self.responses = list(response)
+        else:
+            self.responses = [response]
         self.calls = []
 
     async def __aenter__(self):
@@ -22,13 +26,18 @@ class FakeAsyncClient:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
+    def _next_response(self):
+        if len(self.responses) > 1:
+            return self.responses.pop(0)
+        return self.responses[0]
+
     async def post(self, *args, **kwargs):
         self.calls.append(("POST", args, kwargs))
-        return self.response
+        return self._next_response()
 
     async def get(self, *args, **kwargs):
         self.calls.append(("GET", args, kwargs))
-        return self.response
+        return self._next_response()
 
 
 class BackendClientTests(unittest.TestCase):

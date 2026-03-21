@@ -2,7 +2,7 @@
 """
 Agent Shield CLI
 
-Wraps Codex with runtime interception. Runs Codex as a subprocess and
+Wraps Codex with runtime intercept. Runs Codex as a subprocess and
 monitors child processes and network activity, analyzing them with Qwen before
 allowing or blocking.
 
