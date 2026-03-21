@@ -1,27 +1,9 @@
 require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-// const authenticate = require("./middlewares/authenticate");
-const authRoutes = require("./routes/authRoutes");
-const interceptRoutes = require("./routes/interceptRoutes");
-const auditRoutes = require("./routes/auditRoutes");
-const healthRoutes = require("./routes/healthRoutes");
-
-const app = express();
+const { createApp } = require("./app");
 const PORT = process.env.PORT || 3000;
-
-app.use(cors());
-app.use(express.json());
-
-// Public routes
-app.use("/auth", authRoutes);
-app.use("/health", healthRoutes);
-app.use("/intercept", interceptRoutes);
-
-// Protected routes (dashboard)
-app.use("/audit", auditRoutes);
+const app = createApp();
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`http://localhost:${PORT}/health`);
+  console.log(`http://localhost:${PORT}/api/health`);
 });
