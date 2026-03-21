@@ -233,6 +233,42 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
         self.assertEqual(reason, "local_internal_connection")
         self.assertEqual(metadata, {})
 
+    def test_process_tree_mode_skips_internal_link_local_network_connection(self):
+        interceptor = MCPInterceptor()
+        interceptor._intercept_mode = "process-tree"
+
+        is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
+            cmdline="codex",
+            local_host="fe80::4c78:c35d:8980:e67",
+            local_port="1024",
+            remote_host="fe80::c3e6:8785:8637:ea52",
+            remote_port="1024",
+            process_role="root",
+        )
+
+        self.assertFalse(is_candidate)
+        self.assertEqual(action_type, "")
+        self.assertEqual(reason, "internal_network_connection")
+        self.assertEqual(metadata, {})
+
+    def test_process_tree_mode_skips_private_ipv4_internal_network_connection(self):
+        interceptor = MCPInterceptor()
+        interceptor._intercept_mode = "process-tree"
+
+        is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
+            cmdline="python helper.py",
+            local_host="192.168.1.10",
+            local_port="55000",
+            remote_host="192.168.1.20",
+            remote_port="9000",
+            process_role="child",
+        )
+
+        self.assertFalse(is_candidate)
+        self.assertEqual(action_type, "")
+        self.assertEqual(reason, "internal_network_connection")
+        self.assertEqual(metadata, {})
+
     def test_build_monitored_connection_pid_set_includes_root_process(self):
         monitored = MCPInterceptor._build_monitored_connection_pid_set(
             root_pid=10,
@@ -399,6 +435,160 @@ class MCPInterceptorAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, ("abc", "approve", "cloud", "cloud_review_required"))
         interceptor.backend_client.submit_intercept.assert_awaited_once()
         interceptor.backend_client.poll_decision.assert_awaited_once_with("abc")
+
+    async def test_submit_intercept_for_decision_gracefully_approves_on_submit_error(self):
+        interceptor = MCPInterceptor()
+        interceptor.backend_client.submit_intercept = AsyncMock(
+            return_value={"intercept_id": None, "status": "error", "http_status": 502}
+        )
+        interceptor.backend_client.poll_decision = AsyncMock()
+
+        result = await interceptor._submit_intercept_for_decision(
+            action_type="agent_connection_attempt",
+            content="127.0.0.1:1->1.1.1.1:443",
+            risk={
+                "risk_level": "medium",
+                "risk_score": 45,
+                "recommended_action": "review",
+            },
+        )
+
+        self.assertEqual(
+            result,
+            (None, "approve", "cloud_fallback", "cloud_review_failure_submit_error_approve"),
+        )
+        self.assertGreater(interceptor._backend_degraded_until, 0.0)
+        interceptor.backend_client.poll_decision.assert_not_awaited()
+
+    async def test_submit_intercept_for_decision_gracefully_approves_on_timeout(self):
+        interceptor = MCPInterceptor()
+        interceptor.backend_client.submit_intercept = AsyncMock(
+            return_value={"intercept_id": "abc", "status": "pending"}
+        )
+        interceptor.backend_client.poll_decision = AsyncMock(
+            return_value={"intercept_id": "abc", "decision": "deny", "timeout": True}
+        )
+
+        result = await interceptor._submit_intercept_for_decision(
+            action_type="agent_connection_attempt",
+            content="127.0.0.1:1->1.1.1.1:443",
+            risk={
+                "risk_level": "medium",
+                "risk_score": 45,
+                "recommended_action": "review",
+            },
+        )
+
+        self.assertEqual(
+            result,
+            ("abc", "approve", "cloud_fallback", "cloud_review_failure_decision_timeout_approve"),
+        )
+
+    async def test_submit_intercept_for_decision_skips_backend_during_degraded_window(self):
+        interceptor = MCPInterceptor()
+        interceptor._backend_degraded_until = 10**12
+        interceptor.backend_client.submit_intercept = AsyncMock()
+        interceptor.backend_client.poll_decision = AsyncMock()
+
+        result = await interceptor._submit_intercept_for_decision(
+            action_type="agent_connection_attempt",
+            content="127.0.0.1:1->1.1.1.1:443",
+            risk={
+                "risk_level": "medium",
+                "risk_score": 45,
+                "recommended_action": "review",
+            },
+        )
+
+        self.assertEqual(
+            result,
+            (None, "approve", "cloud_fallback", "cloud_review_failure_backend_degraded_approve"),
+        )
+        interceptor.backend_client.submit_intercept.assert_not_awaited()
+        interceptor.backend_client.poll_decision.assert_not_awaited()
+
+    async def test_handle_connection_intercept_soft_blocks_root_deny_without_kill(self):
+        interceptor = MCPInterceptor()
+        interceptor.process = Mock(pid=100)
+        interceptor._intercept_semaphore = asyncio.Semaphore(1)
+        interceptor._submit_intercept_for_decision = AsyncMock(
+            return_value=(None, "deny", "local", "local_high_risk_auto_deny")
+        )
+        interceptor._kill_process_tree = Mock()
+
+        connection = {
+            "local_endpoint": "10.0.0.10:54000",
+            "remote_endpoint": "104.18.3.2:443",
+            "local_host": "10.0.0.10",
+            "local_port": "54000",
+            "remote_host": "104.18.3.2",
+            "remote_port": "443",
+        }
+
+        with patch(
+            "mcp_interceptor.analyze_risk",
+            return_value={
+                "risk_level": "critical",
+                "risk_score": 95,
+                "summary": "danger",
+                "recommended_action": "deny",
+            },
+        ):
+            await interceptor._handle_connection_intercept(
+                pid=100,
+                cmdline="codex",
+                connection=connection,
+                action_type="agent_connection_attempt",
+                detection_reason="root_process_tree_connection",
+                metadata={"type": "agent_connection"},
+                process_role="root",
+            )
+
+        interceptor._kill_process_tree.assert_not_called()
+        self.assertEqual(interceptor.blocked_count, 1)
+        self.assertFalse(interceptor._shield_terminated_root)
+        self.assertEqual(interceptor.intercepts[-1]["enforcement_mode"], "soft")
+
+    async def test_handle_connection_intercept_hard_blocks_child_deny(self):
+        interceptor = MCPInterceptor()
+        interceptor.process = Mock(pid=100)
+        interceptor._intercept_semaphore = asyncio.Semaphore(1)
+        interceptor._submit_intercept_for_decision = AsyncMock(
+            return_value=(None, "deny", "local", "local_high_risk_auto_deny")
+        )
+        interceptor._kill_process_tree = Mock()
+
+        connection = {
+            "local_endpoint": "10.0.0.10:54000",
+            "remote_endpoint": "104.18.3.2:443",
+            "local_host": "10.0.0.10",
+            "local_port": "54000",
+            "remote_host": "104.18.3.2",
+            "remote_port": "443",
+        }
+
+        with patch(
+            "mcp_interceptor.analyze_risk",
+            return_value={
+                "risk_level": "critical",
+                "risk_score": 95,
+                "summary": "danger",
+                "recommended_action": "deny",
+            },
+        ):
+            await interceptor._handle_connection_intercept(
+                pid=101,
+                cmdline="python helper.py",
+                connection=connection,
+                action_type="agent_connection_attempt",
+                detection_reason="child_process_tree_connection",
+                metadata={"type": "agent_connection"},
+                process_role="child",
+            )
+
+        interceptor._kill_process_tree.assert_called_once_with(101)
+        self.assertEqual(interceptor.blocked_count, 1)
+        self.assertEqual(interceptor.intercepts[-1]["enforcement_mode"], "hard")
 
     async def test_inspect_connections_dedupes_same_socket_across_process_tree(self):
         interceptor = MCPInterceptor()
