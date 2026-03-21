@@ -1,18 +1,28 @@
 {
-  "name": "agent-shield-server",
+  "name": "agent_shield_backend",
   "version": "1.0.0",
-  "type": "module",
+  "description": "",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js",
-    "lint": "eslint . --ext js,mjs"
+    "dev": "nodemon index.js",
+    "vulnerabilities:refresh": "node scripts/refreshVulnerabilityIntel.js",
+    "test": "node --test tests/**/*.test.js"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
   "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.8.0",
     "cors": "^2.8.5",
-    "express": "^4.18.0"
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.16.3"
   },
   "devDependencies": {
-    "eslint": "^8.50.0"
+    "nodemon": "^3.1.14"
   }
 }

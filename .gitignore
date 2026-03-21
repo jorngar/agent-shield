@@ -27,6 +27,12 @@ yarn-error.log*
 *.swp
 *.swo
 
+# Database
+*.db
+
+# Firebase
+firebaseAccountKey.json
+
 # OS
 .DS_Store
 Thumbs.db
@@ -65,3 +71,6 @@ models/
 
 # Cursor
 .cursor/
+
+#FirebaseKey
+**/firebaseAccountKey.json
