@@ -2,6 +2,7 @@ import os
 import shlex
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 
 def _parse_env_assignment(line: str) -> Optional[Tuple[str, str]]:
@@ -31,12 +32,15 @@ def _load_env_file(path: Path) -> None:
     except OSError:
         return
 
+    preserved_keys = set(os.environ.keys())
     for line in raw.splitlines():
         assignment = _parse_env_assignment(line)
         if not assignment:
             continue
         key, value = assignment
-        os.environ.setdefault(key, value)
+        if key in preserved_keys:
+            continue
+        os.environ[key] = value
 
 
 def _load_local_env_files() -> None:
@@ -58,19 +62,40 @@ def _normalize_url(value: str, default: str) -> str:
     return normalized.rstrip("/")
 
 
+def _normalize_backend_url(value: str, default: str) -> str:
+    normalized = _normalize_url(value, default)
+    try:
+        parsed = urlparse(normalized)
+    except ValueError:
+        return normalized
+
+    cleaned_path = parsed.path.rstrip("/")
+    if cleaned_path == "/api":
+        parsed = parsed._replace(path="")
+        return urlunparse(parsed).rstrip("/")
+    return normalized
+
+
+def _normalize_codex_args(tokens: list[str]) -> list[str]:
+    legacy_flag_map = {
+        "--dangerously-skip-possible-errors": "--dangerously-bypass-approvals-and-sandbox",
+    }
+    return [legacy_flag_map.get(token, token) for token in tokens]
+
+
 OLLAMA_HOST = _normalize_url(
     os.getenv("AGENT_SHIELD_OLLAMA_HOST", "http://localhost:11434"),
     "http://localhost:11434",
 )
 OLLAMA_MODEL = os.getenv("AGENT_SHIELD_OLLAMA_MODEL", "qwen3.5:0.8b")
-BACKEND_URL = _normalize_url(
+BACKEND_URL = _normalize_backend_url(
     os.getenv("AGENT_SHIELD_BACKEND_URL", "http://localhost:3000"),
     "http://localhost:3000",
 )
 
 # Use local `codex` binary by default and fall back in runtime if unavailable.
 CODEX_COMMAND = shlex.split(os.getenv("AGENT_SHIELD_CODEX_COMMAND", "codex"))
-CODEX_ARGS = shlex.split(os.getenv("AGENT_SHIELD_CODEX_ARGS", ""))
+CODEX_ARGS = _normalize_codex_args(shlex.split(os.getenv("AGENT_SHIELD_CODEX_ARGS", "")))
 
 INTERCEPT_MODE = os.getenv("AGENT_SHIELD_INTERCEPT_MODE", "process-tree").strip().lower()
 if INTERCEPT_MODE not in {"mcp-targets", "process-tree", "strict"}:

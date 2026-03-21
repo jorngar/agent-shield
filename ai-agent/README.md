@@ -69,6 +69,8 @@ Codex command resolution:
    - `cp .env-example .env`
    - `set -a; source .env; set +a`
    - `python3 cli.py` and `npm run start` also auto-load `ai-agent/.env` if present.
+   - Existing process environment variables win over `.env` values; within the same `.env` file, later lines override earlier ones.
+   - `.env-example` defaults Codex to `-s read-only` so the wrapper starts with filesystem writes sandboxed.
 3. Start backend service (default expected URL: `http://localhost:3000`).
    - For AWS/API Gateway deployment, set `AGENT_SHIELD_BACKEND_URL` to your API endpoint instead of using `localhost`.
 
@@ -107,6 +109,7 @@ Exit behavior:
 - `AGENT_SHIELD_BACKEND_URL` (default `http://localhost:3000`)
 - `AGENT_SHIELD_CODEX_COMMAND` (default `codex`, shell-split)
 - `AGENT_SHIELD_CODEX_ARGS` (default empty, shell-split)
+  - Legacy `--dangerously-skip-possible-errors` is automatically remapped to `--dangerously-bypass-approvals-and-sandbox`.
 - `AGENT_SHIELD_INTERCEPT_MODE` (`mcp-targets`, `process-tree`, or `strict`, default `process-tree`)
 - `AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC` (default `0.1`, minimum `0.05`)
 - `AGENT_SHIELD_LOG_FILE` (default `.agent-shield.log`)
@@ -120,6 +123,10 @@ Whitelist behavior:
 - For AWS deployment, the wrapper only needs `AgentShieldStack.ApiEndpoint`; `ClusterName`, `DatabaseEndpoint`, and `LoadBalancerDns` are backend/ops values, not wrapper config.
 - Explicit whitelist env vars extend the auto-whitelist.
 
+Backend URL handling:
+- `AGENT_SHIELD_BACKEND_URL` can be either the API host root (`https://...execute-api...amazonaws.com`) or the `/api` path (`https://.../api`).
+- The client normalizes both forms so health, intercept, and session routes do not double-prefix `/api`.
+
 ## Backend API
 
-See `BACKEND_API.md` for request/response details.
+See `BACKEND_API.md` for request/response details, including the startup `GET /api/health` probe.

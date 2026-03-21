@@ -11,11 +11,17 @@ class BackendClient:
         self.base_url = (base_url or BACKEND_URL).rstrip("/")
         self.timeout = 5.0
 
+    def _api_url(self, path: str) -> str:
+        clean_path = "/" + path.lstrip("/")
+        if self.base_url.endswith("/api"):
+            return f"{self.base_url}{clean_path}"
+        return f"{self.base_url}/api{clean_path}"
+
     async def health_check(self) -> Dict[str, Any]:
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.get(
-                    f"{self.base_url}/api/health",
+                    self._api_url("/health"),
                     timeout=self.timeout,
                 )
                 if response.is_error:
@@ -65,7 +71,7 @@ class BackendClient:
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(
-                    f"{self.base_url}/api/intercept",
+                    self._api_url("/intercept"),
                     json={
                         "session_id": session_id,
                         "agent": agent,
@@ -103,7 +109,7 @@ class BackendClient:
                 await asyncio.sleep(poll_interval)
                 try:
                     response = await client.get(
-                        f"{self.base_url}/api/intercept/{intercept_id}",
+                        self._api_url(f"/intercept/{intercept_id}"),
                         timeout=self.timeout,
                     )
                     if response.is_error:
@@ -138,7 +144,7 @@ class BackendClient:
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(
-                    f"{self.base_url}/api/session/result",
+                    self._api_url("/session/result"),
                     json={
                         "session_id": session_id,
                         "status": status,

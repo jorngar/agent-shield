@@ -5,11 +5,33 @@ This document describes the API contract used by the Python wrapper in this dire
 ## Endpoints used by wrapper
 
 The wrapper directly calls:
+- `GET /api/health`
 - `POST /api/intercept`
 - `GET /api/intercept/:intercept_id`
 - `POST /api/session/result`
 
 `/api/session/result` should exist, but wrapper execution does not fail if this call returns an error.
+`/api/health` is used as a startup diagnostic; an unhealthy or unreachable response only produces a warning.
+
+Base URL note:
+- The wrapper accepts `AGENT_SHIELD_BACKEND_URL` with or without a trailing `/api`.
+- Requests are normalized so the client still calls the routes documented here without double-prefixing `/api`.
+
+## GET /api/health
+
+Startup connectivity probe.
+
+### Success response example
+
+```json
+{
+  "status": "ok"
+}
+```
+
+Rules expected by wrapper:
+- Any 2xx JSON response with `status` is treated as healthy.
+- Non-2xx responses, invalid JSON, and network failures are reported as warnings only; startup continues.
 
 ## POST /api/intercept
 
@@ -39,8 +61,11 @@ Submit one intercept event for approval.
 
 - `mcp_process_spawn`: command matches MCP detector patterns
 - `mcp_shell_target_access`: command references configured MCP host/port or known MCP proxy port
+- `child_process_spawn`: non-whitelisted child process spawn in `process-tree` mode
 - `shell_process_spawn`: strict-mode shell spawn intercept
-- `mcp_connection_attempt`: network connection intercept
+- `mcp_connection_attempt`: MCP-related network connection intercept
+- `responses_api_connection_attempt`: root Codex HTTPS connection classified as model-provider API traffic
+- `agent_connection_attempt`: non-whitelisted network connection in `process-tree` or `strict` mode
 - `mcp_http_payload`: proxy payload intercept (only if `MCPProxyServer` path is used)
 
 ### Success response (2xx)
