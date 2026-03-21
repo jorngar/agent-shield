@@ -1,8 +1,12 @@
 # infra (AWS CDK)
 
-This CDK app deploys an **EC2 backend** behind an **ALB** plus an **API Gateway** proxy, along with an **RDS Postgres** instance.
+This CDK app deploys the AWS backend for Agent Shield with:
+- API Gateway HTTP API
+- VPC Link to an internal ALB
+- private EC2 backend (Node.js/Express)
+- private RDS Postgres
 
-It is intended to support the local `ai-agent` wrapper’s approval flow by exposing backend API routes (in this repo the local backend is the Express service).
+The local `ai-agent` wrapper (running with local Ollama) calls this backend for second-stage validation and policy/knowledge checks.
 
 ## Deploy
 
@@ -10,17 +14,15 @@ From repo root:
 1. `cd infra`
 2. `npm install`
 3. `npm run build`
-4. `npx cdk synth`
-5. `npx cdk deploy`
+4. `npm test`
+5. `npx cdk synth`
+6. `npx cdk deploy AgentShieldStack`
 
 ## Required environment
 
 CDK typically relies on:
 - `CDK_DEFAULT_ACCOUNT`
 - `CDK_DEFAULT_REGION`
-
-The backend container receives:
-- `OLLAMA_HOST` (optional; falls back to `http://localhost:11434` in the current stack)
 
 ## Required CDK parameters (passed to the stack)
 
@@ -35,19 +37,10 @@ The backend EC2 instance needs:
 Flat summary:
 - VPC (public + private subnets)
 - EC2 instance running the backend (clones private GitHub + runs `npm install` + starts `server/`)
-- Application Load Balancer (ALB) + health check at `/api/health`
-- API Gateway REST API that proxies `/{proxy+}` to the ALB
+- Internal Application Load Balancer (ALB) + health check at `/api/health`
+- API Gateway HTTP API with VPC Link private integration to ALB
 - RDS Postgres + Secrets Manager secret for database password
 
-## Bedrock + Firebase note (important)
+## Runtime note
 
-This repo’s current `infra/` stack does not yet create AWS Bedrock resources or any Firebase integration.
-If/when that is added, it should be implemented in `infra/lib/agent-shield-stack.ts`.
-
-### Current implementation note
-
-The stack currently:
-- grants the EC2 instance permission to invoke Bedrock (`bedrock:InvokeModel`) for the provided model ARN
-- passes Firebase integration via a Secrets Manager secret ARN for the service account JSON
-
-You still need to ensure the backend runtime code uses those env vars and initializes Firebase + Bedrock accordingly.
+This stack does **not** deploy Ollama in AWS. Keep Ollama local with the wrapper, and only expose backend validation APIs through API Gateway.

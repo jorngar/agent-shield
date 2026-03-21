@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import * as cdk from 'aws-cdk-lib/core';
+import * as cdk from 'aws-cdk-lib';
 import { AgentShieldStack } from '../lib/agent-shield-stack';
 
 const app = new cdk.App();

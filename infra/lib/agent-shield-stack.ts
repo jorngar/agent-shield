@@ -5,7 +5,8 @@ import * as targets from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import { Construct } from 'constructs';
 
 export class AgentShieldStack extends cdk.Stack {
@@ -14,9 +15,11 @@ export class AgentShieldStack extends cdk.Stack {
 
     const projectName = 'agent-shield';
     const backendPort = 3000;
+    const dbUsername = 'agentshield_app';
+    const installDir = '/opt/agent-shield';
 
     const vpc = new ec2.Vpc(this, 'AgentShieldVPC', {
-      cidr: '10.0.0.0/16',
+      ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
       maxAzs: 2,
       natGateways: 1,
       subnetConfiguration: [
@@ -36,7 +39,7 @@ export class AgentShieldStack extends cdk.Stack {
     const dbSecret = new secretsmanager.Secret(this, 'DatabaseSecret', {
       secretName: `${projectName}/db-credentials`,
       generateSecretString: {
-        secretStringTemplate: JSON.stringify({ username: 'admin' }),
+        secretStringTemplate: JSON.stringify({ username: dbUsername }),
         excludePunctuation: true,
         includeSpace: false,
         generateStringKey: 'password',
@@ -60,12 +63,13 @@ export class AgentShieldStack extends cdk.Stack {
 
     const alb = new elbv2.ApplicationLoadBalancer(this, 'BackendALB', {
       vpc,
-      internetFacing: true,
+      internetFacing: false,
       loadBalancerName: `${projectName}-alb`,
     });
 
     const listener = alb.addListener('BackendListener', {
       port: 80,
+      open: false,
     });
 
     const gitHubRepo = new cdk.CfnParameter(this, 'GitHubRepo', {
@@ -126,23 +130,27 @@ export class AgentShieldStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    const backendInstance = new ec2.Instance(this, 'BackendInstance', {
+    // Keep backend bootstrap replaceable so broken first-boot user data can be
+    // recovered by redeploying the stack instead of hand-repairing the host.
+    const backendInstance = new ec2.Instance(this, 'BackendInstanceV3', {
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
       role: backendInstanceRole,
       securityGroup: backendSecurityGroup,
       machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+      userDataCausesReplacement: true,
     });
 
     // Allow ALB -> instance connectivity.
     backendInstance.connections.allowFrom(alb, ec2.Port.tcp(backendPort));
 
     backendInstance.addUserData(
-      '#!/bin/bash -xe',
+      'set -xeuo pipefail',
+      'exec > >(tee /var/log/agent-shield-bootstrap.log | logger -t user-data -s 2>/dev/console) 2>&1',
       'export DEBIAN_FRONTEND=noninteractive',
       'yum update -y',
-      'yum install -y git curl jq',
+      'yum install -y git jq',
       // Install Node.js (LTS) via NodeSource.
       'curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -',
       'yum install -y nodejs',
@@ -152,22 +160,43 @@ export class AgentShieldStack extends cdk.Stack {
       // Pull GitHub token from Secrets Manager.
       `GITHUB_TOKEN=$(aws secretsmanager get-secret-value --secret-id ${gitHubTokenSecretArn.valueAsString} --query SecretString --output text)`,
       // Use `$GITHUB_TOKEN` from the shell (not a TS interpolation).
-      `git clone --depth 1 https://x-access-token:$GITHUB_TOKEN@github.com/${gitHubRepo.valueAsString}.git agent-shield`,
-      'cd agent-shield',
-      // Install deps (workspaces)
+      `rm -rf ${installDir}`,
+      `git clone --depth 1 https://x-access-token:$GITHUB_TOKEN@github.com/${gitHubRepo.valueAsString}.git ${installDir}`,
+      `cd ${installDir}`,
+      // Install repo deps (root + workspaces)
       'npm install',
-      // Start backend (Express) on port 3000.
-      `export PORT=${backendPort}`,
-      `export DATABASE_HOST=${database.instanceEndpoint.hostname}`,
-      'export DATABASE_PORT=5432',
-      'export DATABASE_NAME=agentshield',
-      'export DATABASE_USERNAME=admin',
-      `export DATABASE_PASSWORD=$(aws secretsmanager get-secret-value --secret-id ${dbSecret.secretArn} --query SecretString --output text | jq -r .password)`,
-      'export OLLAMA_HOST=http://localhost:11434',
-      `export FIREBASE_SERVICE_ACCOUNT_SECRET_ARN=${firebaseServiceAccountSecretArn.valueAsString}`,
-      `export BEDROCK_FOUNDATION_MODEL_ARN=${bedrockFoundationModelArn.valueAsString}`,
-      // Keep server alive
-      `nohup npm run start --workspace=server > /var/log/agent-shield-backend.log 2>&1 &`,
+      `cat <<EOF > /etc/agent-shield-backend.env`,
+      `PORT=${backendPort}`,
+      `DATABASE_HOST=${database.instanceEndpoint.hostname}`,
+      'DATABASE_PORT=5432',
+      'DATABASE_NAME=agentshield',
+      `DATABASE_USERNAME=${dbUsername}`,
+      `DATABASE_PASSWORD=$(aws secretsmanager get-secret-value --secret-id ${dbSecret.secretArn} --query SecretString --output text | jq -r .password)`,
+      `FIREBASE_SERVICE_ACCOUNT_SECRET_ARN=${firebaseServiceAccountSecretArn.valueAsString}`,
+      `BEDROCK_FOUNDATION_MODEL_ARN=${bedrockFoundationModelArn.valueAsString}`,
+      'EOF',
+      `cat <<'EOF' > /etc/systemd/system/agent-shield-backend.service`,
+      '[Unit]',
+      'Description=Agent Shield backend',
+      'After=network-online.target',
+      'Wants=network-online.target',
+      '',
+      '[Service]',
+      'Type=simple',
+      `WorkingDirectory=${installDir}`,
+      'EnvironmentFile=/etc/agent-shield-backend.env',
+      'ExecStart=/usr/bin/npm run start --workspace=server',
+      'Restart=always',
+      'RestartSec=5',
+      'StandardOutput=append:/var/log/agent-shield-backend.log',
+      'StandardError=append:/var/log/agent-shield-backend.log',
+      '',
+      '[Install]',
+      'WantedBy=multi-user.target',
+      'EOF',
+      'systemctl daemon-reload',
+      'systemctl enable --now agent-shield-backend.service',
+      'systemctl status --no-pager agent-shield-backend.service',
     );
 
     listener.addTargets('BackendTargets', {
@@ -180,28 +209,57 @@ export class AgentShieldStack extends cdk.Stack {
       },
     });
 
-    const api = new apigateway.RestApi(this, 'AgentShieldApi', {
-      restApiName: `${projectName}-api`,
+    const apiGatewayVpcLinkSG = new ec2.SecurityGroup(this, 'ApiGatewayVpcLinkSG', {
+      vpc,
+      allowAllOutbound: true,
+      description: 'Security group for API Gateway VPC link ENIs',
+    });
+
+    alb.connections.allowFrom(
+      apiGatewayVpcLinkSG,
+      ec2.Port.tcp(80),
+      'Allow API Gateway VPC link to reach internal ALB',
+    );
+
+    const vpcLink = new apigwv2.VpcLink(this, 'BackendVpcLink', {
+      vpc,
+      subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [apiGatewayVpcLinkSG],
+      vpcLinkName: `${projectName}-api-vpc-link`,
+    });
+
+    const api = new apigwv2.HttpApi(this, 'AgentShieldApi', {
+      apiName: `${projectName}-api`,
       description: 'Agent Shield API',
-      defaultCorsPreflightOptions: {
-        allowOrigins: apigateway.Cors.ALL_ORIGINS,
-        allowMethods: apigateway.Cors.ALL_METHODS,
+      corsPreflight: {
+        allowHeaders: ['*'],
+        allowMethods: [apigwv2.CorsHttpMethod.ANY],
+        allowOrigins: ['*'],
       },
     });
 
-    const apiIntegration = new apigateway.Integration({
-      type: apigateway.IntegrationType.HTTP_PROXY,
-      uri: `http://${alb.loadBalancerDnsName}/`,
-      integrationHttpMethod: 'ANY',
+    const apiIntegration = new apigwv2Integrations.HttpAlbIntegration(
+      'BackendAlbIntegration',
+      listener,
+      {
+        vpcLink,
+      },
+    );
+
+    api.addRoutes({
+      path: '/',
+      methods: [apigwv2.HttpMethod.ANY],
+      integration: apiIntegration,
     });
 
-    api.root.addMethod('ANY', apiIntegration);
-    api.root.addProxy({
-      defaultIntegration: apiIntegration,
+    api.addRoutes({
+      path: '/{proxy+}',
+      methods: [apigwv2.HttpMethod.ANY],
+      integration: apiIntegration,
     });
 
     new cdk.CfnOutput(this, 'ApiEndpoint', {
-      value: api.url,
+      value: api.apiEndpoint,
       description: 'Agent Shield API Endpoint',
     });
 
@@ -217,7 +275,7 @@ export class AgentShieldStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'LoadBalancerDns', {
       value: alb.loadBalancerDnsName,
-      description: 'Load Balancer DNS',
+      description: 'Internal Load Balancer DNS',
     });
   }
 }
