@@ -69,5 +69,5 @@ models/
 # Cursor
 .cursor/
 
-#Firebase
+#FirebaseKey
 */firebaseAccountKey.json
