@@ -1,0 +1,9 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Hackathon: open read/write — lock this down before production
+    match /intercepts/{interceptId} {
+      allow read, write: if true;
+    }
+  }
+}
