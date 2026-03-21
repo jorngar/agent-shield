@@ -241,6 +241,48 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
 
         self.assertEqual(monitored, {10, 11, 12})
 
+    def test_local_triage_auto_approves_low_risk_actions(self):
+        interceptor = MCPInterceptor()
+
+        decision, reason = interceptor._resolve_local_triage(
+            {
+                "risk_level": "low",
+                "risk_score": 18,
+                "recommended_action": "approve",
+            }
+        )
+
+        self.assertEqual(decision, "approve")
+        self.assertEqual(reason, "local_low_risk_auto_approve")
+
+    def test_local_triage_auto_denies_high_risk_actions(self):
+        interceptor = MCPInterceptor()
+
+        decision, reason = interceptor._resolve_local_triage(
+            {
+                "risk_level": "critical",
+                "risk_score": 97,
+                "recommended_action": "deny",
+            }
+        )
+
+        self.assertEqual(decision, "deny")
+        self.assertEqual(reason, "local_high_risk_auto_deny")
+
+    def test_local_triage_escalates_review_band(self):
+        interceptor = MCPInterceptor()
+
+        decision, reason = interceptor._resolve_local_triage(
+            {
+                "risk_level": "medium",
+                "risk_score": 52,
+                "recommended_action": "review",
+            }
+        )
+
+        self.assertIsNone(decision)
+        self.assertEqual(reason, "cloud_review_required")
+
 
 class MCPInterceptorSessionTests(unittest.TestCase):
     @patch.object(MCPInterceptor, "_refresh_mcp_targets")
@@ -288,8 +330,76 @@ class MCPInterceptorSessionTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "blocked")
 
+    def test_report_session_blocked_takes_precedence_over_shield_kill_exit(self):
+        interceptor = MCPInterceptor()
+        interceptor.backend_client.report_session_result = AsyncMock(return_value={"ok": True})
+        interceptor.blocked_count = 1
+        interceptor._shield_terminated_root = True
+
+        result = asyncio.run(interceptor.report_session(codex_exit_code=-9))
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["codex_exit_code"], -9)
+        self.assertEqual(result["codex_exit_display"], "blocked by shield (signal 9)")
+        self.assertTrue(result["shield_terminated_root"])
+
+    def test_record_shield_termination_only_marks_root_process(self):
+        interceptor = MCPInterceptor()
+        interceptor.process = Mock(pid=100)
+
+        interceptor._record_shield_termination(101)
+        self.assertFalse(interceptor._shield_terminated_root)
+
+        interceptor._record_shield_termination(100)
+        self.assertTrue(interceptor._shield_terminated_root)
+
 
 class MCPInterceptorAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_submit_intercept_for_decision_skips_backend_on_local_approve(self):
+        interceptor = MCPInterceptor()
+        interceptor.backend_client.submit_intercept = AsyncMock()
+        interceptor.backend_client.poll_decision = AsyncMock()
+
+        result = await interceptor._submit_intercept_for_decision(
+            action_type="agent_connection_attempt",
+            content="127.0.0.1:1->1.1.1.1:443",
+            risk={
+                "risk_level": "low",
+                "risk_score": 10,
+                "recommended_action": "approve",
+            },
+        )
+
+        self.assertEqual(
+            result,
+            (None, "approve", "local", "local_low_risk_auto_approve"),
+        )
+        interceptor.backend_client.submit_intercept.assert_not_awaited()
+        interceptor.backend_client.poll_decision.assert_not_awaited()
+
+    async def test_submit_intercept_for_decision_escalates_review_to_cloud(self):
+        interceptor = MCPInterceptor()
+        interceptor.backend_client.submit_intercept = AsyncMock(
+            return_value={"intercept_id": "abc", "status": "pending"}
+        )
+        interceptor.backend_client.poll_decision = AsyncMock(
+            return_value={"intercept_id": "abc", "decision": "approve"}
+        )
+
+        result = await interceptor._submit_intercept_for_decision(
+            action_type="agent_connection_attempt",
+            content="127.0.0.1:1->1.1.1.1:443",
+            risk={
+                "risk_level": "medium",
+                "risk_score": 45,
+                "recommended_action": "review",
+            },
+        )
+
+        self.assertEqual(result, ("abc", "approve", "cloud", "cloud_review_required"))
+        interceptor.backend_client.submit_intercept.assert_awaited_once()
+        interceptor.backend_client.poll_decision.assert_awaited_once_with("abc")
+
     async def test_inspect_connections_dedupes_same_socket_across_process_tree(self):
         interceptor = MCPInterceptor()
         interceptor._loop = asyncio.get_running_loop()

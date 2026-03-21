@@ -21,8 +21,10 @@ At a high level the wrapper does this:
 
 Important runtime semantics:
 - Intercept decisions are fail-closed. Submission failures, missing `intercept_id`, or polling timeout all resolve to `deny`.
+- Local risk triage runs first. Low-risk `approve` results are allowed locally, high-risk `deny` results are blocked locally, and only the uncertain review band is escalated to the backend.
 - Backend health checks are best effort. Startup continues even if `GET /api/health` fails.
 - Final session reporting is best effort. A failed `POST /api/session/result` does not change the already computed wrapper result.
+- A denied intercept can intentionally terminate Codex. In that case the raw child exit may be a signal such as `-9`, but the wrapper reports the session as `blocked` rather than `failed`.
 - Backend and Ollama traffic is auto-whitelisted by hostname, localhost alias, and resolved IP address so the wrapper does not self-intercept its own approval and risk-analysis calls.
 - Logs go to `.agent-shield.log` by default so Codex TUI output stays clean unless `--verbose` is used.
 
@@ -100,7 +102,7 @@ Direct examples:
 python3 cli.py
 python3 cli.py --backend http://localhost:3000
 python3 cli.py --backend http://localhost:3000 -- --help
-AGENT_SHIELD_BACKEND_URL=https://n73h8lxc41.execute-api.ap-southeast-1.amazonaws.com python3 cli.py
+AGENT_SHIELD_BACKEND_URL=https://fmu6gbm7t8.execute-api.ap-northeast-1.amazonaws.compython3 cli.py
 ```
 
 `npm` script wrappers:
@@ -149,6 +151,8 @@ Codex argument compatibility:
 
 - `AGENT_SHIELD_INTERCEPT_MODE`: `mcp-targets`, `process-tree`, or `strict`
 - `AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC`: descendant scan cadence in seconds, default `0.1`, minimum `0.05`
+- `AGENT_SHIELD_LOCAL_APPROVE_MAX_SCORE`: highest score eligible for local auto-approve, default `25`
+- `AGENT_SHIELD_LOCAL_DENY_MIN_SCORE`: lowest score eligible for local auto-deny, default `75`
 - `AGENT_SHIELD_RESPONSES_API_HOSTS`: comma-separated hostnames treated as model-provider API destinations, default `api.openai.com`
 
 ### Logging and allowlists

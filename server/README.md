@@ -41,6 +41,11 @@ The wrapper expects:
 Health check:
 - `GET /api/health`
 
+Audit:
+- `GET /api/audit`
+- `GET /api/audit/all`
+- `PATCH /api/audit/:id/decision`
+
 Tinyfish research:
 - `GET /api/research/agent-vulnerabilities`
 - `POST /api/research/agent-vulnerabilities` (compatibility alias for cached reads)

@@ -157,7 +157,7 @@ Example request:
 
 `status` values:
 - `success`: Codex exited with code `0` and no denied intercepts occurred
-- `blocked`: at least one intercept was denied
+- `blocked`: at least one intercept was denied; this takes precedence even if the wrapper intentionally terminates Codex afterward
 - `failed`: wrapper startup failed or Codex exited non-zero
 
 Intercept object notes:
