@@ -10,6 +10,11 @@ from mcp_interceptor import MCPInterceptor
 
 
 class MCPInterceptorHelperTests(unittest.TestCase):
+    def test_default_intercept_mode_is_process_tree(self):
+        with patch("mcp_interceptor.INTERCEPT_MODE", "process-tree"):
+            interceptor = MCPInterceptor()
+        self.assertEqual(interceptor._intercept_mode, "process-tree")
+
     def test_resolve_codex_invocation_falls_back_to_npx(self):
         interceptor = MCPInterceptor()
         with patch("mcp_interceptor.shutil.which", return_value=None):
@@ -48,16 +53,19 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
 
     def test_classify_connection_candidate_from_config(self):
         interceptor = MCPInterceptor()
+        interceptor._intercept_mode = "mcp-targets"
         interceptor._mcp_target_hosts = {"mcp.example.com"}
 
-        is_candidate, reason = interceptor._classify_connection_candidate(
+        is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
             cmdline="python worker.py",
             remote_host="mcp.example.com",
             remote_port="443",
         )
 
         self.assertTrue(is_candidate)
+        self.assertEqual(action_type, "mcp_connection_attempt")
         self.assertEqual(reason, "configured_mcp_host")
+        self.assertEqual(metadata["type"], "mcp_connection")
 
     def test_command_references_mcp_target_endpoint(self):
         interceptor = MCPInterceptor()
@@ -69,6 +77,19 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
         self.assertTrue(matched)
         self.assertEqual(reason, "shell_references_mcp_port")
         self.assertEqual(endpoint, ("127.0.0.1", 3001))
+
+    def test_classify_process_spawn_process_tree_mode_intercepts_non_mcp(self):
+        interceptor = MCPInterceptor()
+        interceptor._intercept_mode = "process-tree"
+
+        should_intercept, action_type, detection_reason, metadata = (
+            interceptor._classify_process_spawn("python harmless_script.py")
+        )
+
+        self.assertTrue(should_intercept)
+        self.assertEqual(action_type, "child_process_spawn")
+        self.assertEqual(detection_reason, "process_tree_child_process")
+        self.assertEqual(metadata["type"], "child_process")
 
     def test_classify_process_spawn_strict_mode_intercepts_non_mcp(self):
         interceptor = MCPInterceptor()
@@ -102,14 +123,16 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
         interceptor._intercept_mode = "strict"
         interceptor._whitelist_ports.add(11434)
 
-        is_candidate, reason = interceptor._classify_connection_candidate(
+        is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
             cmdline="python worker.py",
             remote_host="127.0.0.1",
             remote_port="11434",
         )
 
         self.assertFalse(is_candidate)
+        self.assertEqual(action_type, "")
         self.assertEqual(reason, "whitelisted_endpoint")
+        self.assertEqual(metadata, {})
 
     def test_default_whitelist_includes_backend_and_ollama(self):
         interceptor = MCPInterceptor(backend_url="http://localhost:3300")
@@ -125,6 +148,47 @@ node 123 user 22u IPv4 0x00 0t0 TCP 10.0.0.10:54001->104.18.3.2:443 (ESTABLISHED
                 "n73h8lxc41.execute-api.ap-southeast-1.amazonaws.com", 443
             )
         )
+
+    def test_root_codex_responses_api_connection_is_intercepted(self):
+        interceptor = MCPInterceptor()
+        interceptor._intercept_mode = "process-tree"
+
+        is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
+            cmdline="codex",
+            remote_host="104.18.3.2",
+            remote_port="443",
+            process_role="root",
+        )
+
+        self.assertTrue(is_candidate)
+        self.assertEqual(action_type, "responses_api_connection_attempt")
+        self.assertEqual(reason, "codex_root_remote_https")
+        self.assertEqual(metadata["type"], "responses_api_connection")
+        self.assertEqual(metadata["process_role"], "root")
+
+    def test_process_tree_mode_intercepts_generic_child_connection(self):
+        interceptor = MCPInterceptor()
+        interceptor._intercept_mode = "process-tree"
+
+        is_candidate, action_type, reason, metadata = interceptor._classify_connection_candidate(
+            cmdline="npx @playwright/mcp",
+            remote_host="registry.npmjs.org",
+            remote_port="443",
+            process_role="child",
+        )
+
+        self.assertTrue(is_candidate)
+        self.assertEqual(action_type, "agent_connection_attempt")
+        self.assertEqual(reason, "child_process_tree_connection")
+        self.assertEqual(metadata["type"], "agent_connection")
+
+    def test_build_monitored_connection_pid_set_includes_root_process(self):
+        monitored = MCPInterceptor._build_monitored_connection_pid_set(
+            root_pid=10,
+            descendants={11, 12},
+        )
+
+        self.assertEqual(monitored, {10, 11, 12})
 
 
 class MCPInterceptorSessionTests(unittest.TestCase):

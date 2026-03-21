@@ -33,6 +33,37 @@ test("GET /api/health returns ok", async () => {
   });
 });
 
+test("GET /api returns route index", async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api`);
+    assert.equal(response.status, 200);
+
+    const body = await response.json();
+    assert.equal(body.service, "agent-shield-backend");
+    assert.ok(body.routes.includes("POST /api/intercept"));
+    assert.ok(body.routes.includes("POST /api/session/result"));
+  });
+});
+
+test("requests emit access log lines", async () => {
+  const originalLog = console.log;
+  const messages = [];
+  console.log = (...args) => {
+    messages.push(args.join(" "));
+  };
+
+  try {
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/health`);
+      assert.equal(response.status, 200);
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.ok(messages.some((line) => line.includes("[HTTP] GET /api/health -> 200")));
+});
+
 test("intercepts can be created and immediately polled when auto-denied", async () => {
   await withServer(async (baseUrl) => {
     const interceptResponse = await fetch(`${baseUrl}/api/intercept`, {

@@ -73,6 +73,19 @@ class BackendClientTests(unittest.TestCase):
         self.assertEqual(result["http_status"], 404)
         self.assertIn("error", result)
 
+    def test_health_check_returns_ok_for_success_response(self):
+        request = httpx.Request("GET", "http://localhost:3000/api/health")
+        response = httpx.Response(200, request=request, json={"status": "ok"})
+
+        with patch(
+            "api_client.httpx.AsyncClient", return_value=FakeAsyncClient(response)
+        ):
+            client = BackendClient("http://localhost:3000")
+            result = asyncio.run(client.health_check())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

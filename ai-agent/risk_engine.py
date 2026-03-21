@@ -4,11 +4,11 @@ import requests
 from typing import Dict, Any
 from config import OLLAMA_HOST, OLLAMA_MODEL
 
-RISK_SYSTEM_PROMPT = """You are a security risk analysis engine for AI agents. Your role is to evaluate agent actions for potential security threats, specifically detecting unauthorized MCP (Model Context Protocol) server usage.
+RISK_SYSTEM_PROMPT = """You are a security risk analysis engine for AI agents. Your role is to evaluate agent actions across the full agent process tree for potential security threats, including MCP usage, child-process execution, browser tooling, package bootstraps, and outbound model API calls.
 
 <objectives>
 1. Analyze the action described in <agent_action> tags.
-2. Identify all security risks, especially MCP server connections.
+2. Identify all security risks, especially risky child processes, external network access, MCP server connections, and model API access.
 3. Return your assessment as a single valid JSON object.
 </objectives>
 
@@ -25,9 +25,12 @@ destructive_operation : DELETE, DROP, rm -rf, irreversible actions
 data_exfiltration     : sending data to external destinations
 privilege_escalation  : sudo, system file modification
 network_access        : outbound HTTP to external URLs
+model_api_access      : outbound connection to remote LLM / Responses API
 mcp_unauthorized      : unauthorized MCP server connection attempt
 file_system_write     : writing outside working directory
 dependency_injection  : installing packages, modifying deps
+tool_execution        : shell/tool/process execution with unclear or risky intent
+browser_automation    : browser automation that can navigate or act on remote sites
 safe                  : no risk detected
 </categories>
 
@@ -55,7 +58,7 @@ RISK_USER_PROMPT = """<no_think>
 </agent_action>
 
 <objectives>
-1. Identify all security risks in the action above, especially MCP server usage.
+1. Identify all security risks in the action above, especially risky process execution, outbound model/API access, and MCP server usage.
 2. Return your assessment as a single valid JSON object and nothing else.
 </objectives>
 
@@ -78,9 +81,12 @@ VALID_CATEGORIES = {
     "data_exfiltration",
     "privilege_escalation",
     "network_access",
+    "model_api_access",
     "mcp_unauthorized",
     "file_system_write",
     "dependency_injection",
+    "tool_execution",
+    "browser_automation",
     "safe",
 }
 VALID_RECOMMENDED_ACTIONS = {"approve", "review", "deny"}

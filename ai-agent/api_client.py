@@ -11,6 +11,24 @@ class BackendClient:
         self.base_url = (base_url or BACKEND_URL).rstrip("/")
         self.timeout = 5.0
 
+    async def health_check(self) -> Dict[str, Any]:
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    f"{self.base_url}/api/health",
+                    timeout=self.timeout,
+                )
+                if response.is_error:
+                    return {
+                        "ok": False,
+                        "http_status": response.status_code,
+                        "error": response.text[:300],
+                    }
+                data = response.json()
+                return {"ok": True, "status": data.get("status", "ok")}
+            except (httpx.HTTPError, ValueError) as e:
+                return {"ok": False, "error": str(e)}
+
     async def submit_intercept(
         self,
         session_id: str,

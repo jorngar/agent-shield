@@ -28,6 +28,10 @@ Example:
 
 ## Routes
 
+Quick index:
+- `GET /`
+- `GET /api`
+
 The wrapper expects:
 - `POST /api/intercept`
 - `GET /api/intercept/:intercept_id`

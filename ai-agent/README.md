@@ -6,7 +6,7 @@ Python wrapper that launches Codex and intercepts suspicious process/network act
 
 1. Starts Codex as a subprocess with inherited stdio (TTY-friendly behavior).
 2. Loads configured MCP targets from `codex mcp list --json` (or `npx -y @openai/codex ...` fallback).
-3. Monitors Codex descendant processes and established TCP connections.
+3. Monitors Codex child processes plus established TCP connections from Codex itself and its descendants.
 4. Runs risk analysis via local Ollama.
 5. Sends intercept payloads to backend approval API.
 6. Enforces decision:
@@ -28,18 +28,25 @@ Scope:
 
 `AGENT_SHIELD_INTERCEPT_MODE` controls how aggressively process/connection events are intercepted.
 
-### `mcp-targets` (default)
+### `mcp-targets`
 
 Intercept when a descendant process/connection looks MCP-related:
 - Command matches MCP patterns (`action_type=mcp_process_spawn`).
 - Command references configured MCP host/port or known MCP proxy ports (`action_type=mcp_shell_target_access`).
 - Established connection matches MCP process/targets/ports (`action_type=mcp_connection_attempt`).
 
+### `process-tree` (default)
+
+Intercept all non-whitelisted child processes and all non-whitelisted connections from the Codex process tree:
+- Any child process spawn (`action_type=child_process_spawn`).
+- Any non-whitelisted established connection from Codex or a child (`action_type=agent_connection_attempt`).
+- Codex root outbound HTTPS is classified as Responses API traffic (`action_type=responses_api_connection_attempt`) unless whitelisted.
+
 ### `strict`
 
 Intercept all non-whitelisted descendants:
 - Any shell process spawn (`action_type=shell_process_spawn`).
-- Any established connection (`action_type=mcp_connection_attempt`).
+- Any established connection (`action_type=agent_connection_attempt`).
 
 ## Requirements
 
@@ -61,6 +68,7 @@ Codex command resolution:
 2. Configure environment (optional but recommended):
    - `cp .env-example .env`
    - `set -a; source .env; set +a`
+   - `python3 cli.py` and `npm run start` also auto-load `ai-agent/.env` if present.
 3. Start backend service (default expected URL: `http://localhost:3000`).
    - For AWS/API Gateway deployment, set `AGENT_SHIELD_BACKEND_URL` to your API endpoint instead of using `localhost`.
 
@@ -84,6 +92,10 @@ Run tests:
 - `--verbose` / `-v`: mirror interceptor logs to stderr (logs are always written to `AGENT_SHIELD_LOG_FILE`)
 - `codex_args`: forwarded to Codex invocation
 
+Startup diagnostics:
+- The wrapper prints the active intercept mode.
+- The wrapper probes `GET /api/health` and warns if the configured backend is unreachable.
+
 Exit behavior:
 - Exit `0`: session `success` or `blocked`
 - Exit `1`: startup/runtime failure or interrupt
@@ -95,9 +107,10 @@ Exit behavior:
 - `AGENT_SHIELD_BACKEND_URL` (default `http://localhost:3000`)
 - `AGENT_SHIELD_CODEX_COMMAND` (default `codex`, shell-split)
 - `AGENT_SHIELD_CODEX_ARGS` (default empty, shell-split)
-- `AGENT_SHIELD_INTERCEPT_MODE` (`mcp-targets` or `strict`, default `mcp-targets`)
-- `AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC` (default `0.2`, minimum `0.05`)
+- `AGENT_SHIELD_INTERCEPT_MODE` (`mcp-targets`, `process-tree`, or `strict`, default `process-tree`)
+- `AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC` (default `0.1`, minimum `0.05`)
 - `AGENT_SHIELD_LOG_FILE` (default `.agent-shield.log`)
+- `AGENT_SHIELD_RESPONSES_API_HOSTS` (comma-separated hostnames, default `api.openai.com`)
 - `AGENT_SHIELD_WHITELIST_HOSTS` (comma-separated hosts, case-insensitive)
 - `AGENT_SHIELD_WHITELIST_PORTS` (comma-separated ports)
 - `AGENT_SHIELD_WHITELIST_COMMAND_PATTERNS` (comma-separated command substrings, case-insensitive)

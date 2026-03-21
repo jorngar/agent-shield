@@ -1,5 +1,56 @@
 import os
 import shlex
+from pathlib import Path
+from typing import Optional, Tuple
+
+
+def _parse_env_assignment(line: str) -> Optional[Tuple[str, str]]:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    if stripped.startswith("export "):
+        stripped = stripped[7:].strip()
+    if "=" not in stripped:
+        return None
+
+    key, value = stripped.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if not key:
+        return None
+
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+
+    return key, value
+
+
+def _load_env_file(path: Path) -> None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    for line in raw.splitlines():
+        assignment = _parse_env_assignment(line)
+        if not assignment:
+            continue
+        key, value = assignment
+        os.environ.setdefault(key, value)
+
+
+def _load_local_env_files() -> None:
+    module_dir = Path(__file__).resolve().parent
+    candidate_paths = [module_dir / ".env"]
+    cwd_env = Path.cwd() / ".env"
+    if cwd_env not in candidate_paths:
+        candidate_paths.append(cwd_env)
+
+    for path in candidate_paths:
+        _load_env_file(path)
+
+
+_load_local_env_files()
 
 
 def _normalize_url(value: str, default: str) -> str:
@@ -21,16 +72,16 @@ BACKEND_URL = _normalize_url(
 CODEX_COMMAND = shlex.split(os.getenv("AGENT_SHIELD_CODEX_COMMAND", "codex"))
 CODEX_ARGS = shlex.split(os.getenv("AGENT_SHIELD_CODEX_ARGS", ""))
 
-INTERCEPT_MODE = os.getenv("AGENT_SHIELD_INTERCEPT_MODE", "mcp-targets").strip().lower()
-if INTERCEPT_MODE not in {"mcp-targets", "strict"}:
-    INTERCEPT_MODE = "mcp-targets"
+INTERCEPT_MODE = os.getenv("AGENT_SHIELD_INTERCEPT_MODE", "process-tree").strip().lower()
+if INTERCEPT_MODE not in {"mcp-targets", "process-tree", "strict"}:
+    INTERCEPT_MODE = "process-tree"
 
 try:
     PROCESS_SCAN_INTERVAL_SEC = float(
-        os.getenv("AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC", "0.2")
+        os.getenv("AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC", "0.1")
     )
 except ValueError:
-    PROCESS_SCAN_INTERVAL_SEC = 0.2
+    PROCESS_SCAN_INTERVAL_SEC = 0.1
 PROCESS_SCAN_INTERVAL_SEC = max(0.05, PROCESS_SCAN_INTERVAL_SEC)
 
 LOG_FILE = os.getenv("AGENT_SHIELD_LOG_FILE", ".agent-shield.log").strip()
@@ -59,6 +110,13 @@ for token in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_PORTS", "")):
 WHITELIST_COMMAND_PATTERNS = [
     pattern.lower()
     for pattern in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_COMMAND_PATTERNS", ""))
+]
+
+RESPONSES_API_HOSTS = [
+    host.lower()
+    for host in _parse_csv_env(
+        os.getenv("AGENT_SHIELD_RESPONSES_API_HOSTS", "api.openai.com")
+    )
 ]
 
 MCP_PATTERNS = [

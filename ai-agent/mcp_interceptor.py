@@ -21,6 +21,7 @@ from config import (
     LOG_FILE,
     OLLAMA_HOST,
     PROCESS_SCAN_INTERVAL_SEC,
+    RESPONSES_API_HOSTS,
     WHITELIST_COMMAND_PATTERNS,
     WHITELIST_HOSTS,
     WHITELIST_PORTS,
@@ -31,12 +32,12 @@ from risk_engine import analyze_risk
 
 class MCPInterceptor:
     """
-    Wraps Codex and intercepts MCP-related activity.
+    Wraps Codex and intercepts risky runtime activity across the Codex process tree.
 
     Interception sources:
     - MCP-like process spawn commands
-    - New established TCP connections for Codex descendant processes that match
-      configured MCP targets or known MCP markers.
+    - Child process spawns in broader process-tree modes
+    - New established TCP connections for Codex itself and descendant processes
     """
 
     def __init__(
@@ -59,6 +60,7 @@ class MCPInterceptor:
         self._seen_connections: Set[Tuple[int, str, str]] = set()
         self._mcp_target_hosts: Set[str] = set()
         self._mcp_target_ports: Set[int] = set()
+        self._responses_api_hosts: Set[str] = set(RESPONSES_API_HOSTS)
         self._intercept_mode = INTERCEPT_MODE
         self._verbose = verbose
         self._log_lock = threading.Lock()
@@ -231,6 +233,45 @@ class MCPInterceptor:
             aliases |= {"localhost", "127.0.0.1", "::1", "0.0.0.0", "::"}
         return aliases
 
+    @staticmethod
+    def _is_codex_process(cmdline: str) -> bool:
+        lowered = (cmdline or "").lower()
+        return "codex" in lowered or "@openai/codex" in lowered
+
+    def _looks_like_responses_api_connection(
+        self,
+        cmdline: str,
+        remote_host: str,
+        parsed_port: Optional[int],
+        process_role: str,
+    ) -> Tuple[bool, str]:
+        host_aliases = self._host_aliases(remote_host) if remote_host else set()
+        if host_aliases & self._responses_api_hosts:
+            return True, "responses_api_host"
+
+        lowered_cmdline = (cmdline or "").lower()
+        if "/v1/responses" in lowered_cmdline or "api.openai.com" in lowered_cmdline:
+            return True, "responses_api_reference"
+
+        # Codex's own outbound HTTPS traffic is typically its Responses API call path.
+        if (
+            process_role == "root"
+            and self._is_codex_process(cmdline)
+            and parsed_port == 443
+            and not self._is_local_host(remote_host)
+        ):
+            return True, "codex_root_remote_https"
+
+        return False, ""
+
+    @staticmethod
+    def _build_monitored_connection_pid_set(
+        root_pid: int, descendants: Set[int]
+    ) -> Set[int]:
+        monitored = set(descendants)
+        monitored.add(root_pid)
+        return monitored
+
     def _build_endpoint_whitelist(
         self, backend_url: str, ollama_url: str
     ) -> Tuple[Set[str], Set[int], Set[Tuple[str, int]]]:
@@ -358,6 +399,18 @@ class MCPInterceptor:
                 metadata,
             )
 
+        if self._intercept_mode == "process-tree":
+            return (
+                True,
+                "child_process_spawn",
+                "process_tree_child_process",
+                {
+                    "type": "child_process",
+                    "matched_patterns": ["process_tree_child_process"],
+                    "severity": "medium",
+                },
+            )
+
         if self._intercept_mode == "strict":
             return (
                 True,
@@ -468,7 +521,7 @@ class MCPInterceptor:
 
         try:
             established_out = subprocess.check_output(
-                ["lsof", "-nP", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED"],
+                ["lsof", "-P", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED"],
                 text=True,
             )
         except subprocess.CalledProcessError:
@@ -498,33 +551,114 @@ class MCPInterceptor:
             return False
 
     def _classify_connection_candidate(
-        self, cmdline: str, remote_host: str, remote_port: str
-    ) -> Tuple[bool, str]:
+        self,
+        cmdline: str,
+        remote_host: str,
+        remote_port: str,
+        process_role: str = "child",
+    ) -> Tuple[bool, str, str, Dict[str, Any]]:
         try:
             parsed_port = int(remote_port)
         except (TypeError, ValueError):
             parsed_port = None
 
         if self._is_whitelisted_endpoint(remote_host, parsed_port):
-            return False, "whitelisted_endpoint"
+            return False, "", "whitelisted_endpoint", {}
 
         is_mcp_process, _, process_type = self.mcp_detector.scan_content(cmdline)
         if is_mcp_process:
-            return True, f"mcp_process:{process_type}"
+            return (
+                True,
+                "mcp_connection_attempt",
+                f"mcp_process:{process_type}",
+                {
+                    "type": "mcp_connection",
+                    "process_role": process_role,
+                    "severity": "high",
+                },
+            )
 
         if remote_host and remote_host.lower() in self._mcp_target_hosts:
-            return True, "configured_mcp_host"
+            return (
+                True,
+                "mcp_connection_attempt",
+                "configured_mcp_host",
+                {
+                    "type": "mcp_connection",
+                    "process_role": process_role,
+                    "severity": "high",
+                },
+            )
 
         if parsed_port is not None and parsed_port in self._mcp_target_ports:
-            return True, "configured_mcp_port"
+            return (
+                True,
+                "mcp_connection_attempt",
+                "configured_mcp_port",
+                {
+                    "type": "mcp_connection",
+                    "process_role": process_role,
+                    "severity": "high",
+                },
+            )
 
         if parsed_port is not None and parsed_port in INTERCEPTABLE_PORTS:
-            return True, "known_mcp_proxy_port"
+            return (
+                True,
+                "mcp_connection_attempt",
+                "known_mcp_proxy_port",
+                {
+                    "type": "mcp_connection",
+                    "process_role": process_role,
+                    "severity": "high",
+                },
+            )
+
+        looks_like_responses_api, responses_reason = (
+            self._looks_like_responses_api_connection(
+                cmdline=cmdline,
+                remote_host=remote_host,
+                parsed_port=parsed_port,
+                process_role=process_role,
+            )
+        )
+        if looks_like_responses_api:
+            return (
+                True,
+                "responses_api_connection_attempt",
+                responses_reason,
+                {
+                    "type": "responses_api_connection",
+                    "process_role": process_role,
+                    "severity": "high" if process_role == "root" else "medium",
+                },
+            )
+
+        if self._intercept_mode == "process-tree":
+            return (
+                True,
+                "agent_connection_attempt",
+                f"{process_role}_process_tree_connection",
+                {
+                    "type": "agent_connection",
+                    "process_role": process_role,
+                    "severity": "medium",
+                },
+            )
 
         if self._intercept_mode == "strict":
-            return True, "strict_mode_all_connections"
+            return (
+                True,
+                "agent_connection_attempt",
+                "strict_mode_all_connections",
+                {
+                    "type": "agent_connection",
+                    "process_role": process_role,
+                    "severity": "medium",
+                },
+            )
 
-        return False, "non_mcp_connection"
+        return False, "", "non_mcp_connection", {}
 
     def _kill_process_tree(self, root_pid: int) -> None:
         try:
@@ -568,8 +702,8 @@ class MCPInterceptor:
 
         while self._running and self.process and self.process.poll() is None:
             try:
-                current = self._get_descendant_pids(root_pid)
-                new_pids = sorted(current - self._seen_pids)
+                current_descendants = self._get_descendant_pids(root_pid)
+                new_pids = sorted(current_descendants - self._seen_pids)
 
                 for pid in new_pids:
                     cmdline = self._get_process_args(pid)
@@ -595,14 +729,18 @@ class MCPInterceptor:
                         )
                         self._seen_pids.add(pid)
 
-                self._inspect_connections_for_pids(current)
+                monitored_pids = self._build_monitored_connection_pid_set(
+                    root_pid=root_pid,
+                    descendants=current_descendants,
+                )
+                self._inspect_connections_for_pids(root_pid=root_pid, pids=monitored_pids)
                 self._seen_pids |= set(new_pids)
             except Exception as exc:
                 self._log(f"process monitor error: {exc}", level="ERROR")
 
             time.sleep(PROCESS_SCAN_INTERVAL_SEC)
 
-    def _inspect_connections_for_pids(self, pids: Set[int]) -> None:
+    def _inspect_connections_for_pids(self, root_pid: int, pids: Set[int]) -> None:
         if not self._loop:
             return
 
@@ -610,6 +748,7 @@ class MCPInterceptor:
             cmdline = self._get_process_args(pid)
             if not cmdline:
                 continue
+            process_role = "root" if pid == root_pid else "child"
 
             network_info = self._inspect_process_network(pid)
             for conn in network_info.get("established_connections", []):
@@ -618,17 +757,29 @@ class MCPInterceptor:
                     continue
 
                 self._seen_connections.add(key)
-                is_candidate, reason = self._classify_connection_candidate(
+                (
+                    is_candidate,
+                    action_type,
+                    reason,
+                    metadata,
+                ) = self._classify_connection_candidate(
                     cmdline=cmdline,
                     remote_host=conn["remote_host"],
                     remote_port=conn["remote_port"],
+                    process_role=process_role,
                 )
                 if not is_candidate:
                     continue
 
                 asyncio.run_coroutine_threadsafe(
-                    self._handle_mcp_connection(
-                        pid=pid, cmdline=cmdline, connection=conn, detection_reason=reason
+                    self._handle_connection_intercept(
+                        pid=pid,
+                        cmdline=cmdline,
+                        connection=conn,
+                        action_type=action_type,
+                        detection_reason=reason,
+                        metadata=metadata,
+                        process_role=process_role,
                     ),
                     self._loop,
                 )
@@ -687,12 +838,15 @@ class MCPInterceptor:
             }
         )
 
-    async def _handle_mcp_connection(
+    async def _handle_connection_intercept(
         self,
         pid: int,
         cmdline: str,
         connection: Dict[str, str],
+        action_type: str,
         detection_reason: str,
+        metadata: Dict[str, Any],
+        process_role: str,
     ) -> None:
         local_endpoint = connection.get("local_endpoint", "")
         remote_endpoint = connection.get("remote_endpoint", "")
@@ -700,24 +854,25 @@ class MCPInterceptor:
         connection_scope = "local" if self._is_local_host(remote_host) else "remote"
 
         self._log(
-            f"MCP connection detected (PID: {pid}, {connection_scope}): "
+            f"Connection intercepted ({action_type}, PID: {pid}, role={process_role}, {connection_scope}): "
             f"{local_endpoint} -> {remote_endpoint}"
         )
 
         risk = await asyncio.to_thread(
             analyze_risk,
             self.agent_name,
-            "mcp_connection_attempt",
+            action_type,
             remote_endpoint,
             (
-                f"pid={pid}; reason={detection_reason}; scope={connection_scope}; "
+                f"pid={pid}; process_role={process_role}; reason={detection_reason}; "
+                f"classification={metadata.get('type', 'unknown')}; scope={connection_scope}; "
                 f"local_endpoint={local_endpoint}; remote_endpoint={remote_endpoint}; "
                 f"process_cmd={cmdline[:500]}"
             ),
         )
 
         intercept_id, final_decision = await self._submit_intercept_for_decision(
-            action_type="mcp_connection_attempt",
+            action_type=action_type,
             content=f"{local_endpoint}->{remote_endpoint}",
             risk=risk,
         )
@@ -738,9 +893,11 @@ class MCPInterceptor:
                 "timestamp": datetime.utcnow().isoformat(),
                 "content_preview": f"{local_endpoint}->{remote_endpoint}"[:100],
                 "process_pid": pid,
-                "process_type": "connection",
+                "process_type": metadata.get("type", "connection"),
                 "event_type": "network_connection",
                 "connection_scope": connection_scope,
+                "process_role": process_role,
+                "action_type": action_type,
                 "detection_reason": detection_reason,
             }
         )

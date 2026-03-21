@@ -2,8 +2,8 @@
 """
 Agent Shield CLI
 
-Wraps Codex with MCP interception. Runs Codex as a subprocess and
-monitors for MCP server connections, analyzing them with Qwen before
+Wraps Codex with runtime interception. Runs Codex as a subprocess and
+monitors child processes and network activity, analyzing them with Qwen before
 allowing or blocking.
 
 Usage:
@@ -16,12 +16,16 @@ Usage:
 import argparse
 import asyncio
 import sys
-from config import BACKEND_URL
+from config import BACKEND_URL, INTERCEPT_MODE
 from mcp_interceptor import create_interceptor
 
 
+def interceptor_mode_display() -> str:
+    return INTERCEPT_MODE
+
+
 async def main():
-    parser = argparse.ArgumentParser(description="Agent Shield - Codex MCP Interceptor")
+    parser = argparse.ArgumentParser(description="Agent Shield - Codex Runtime Interceptor")
     parser.add_argument("codex_args", nargs="*", help="Arguments to pass to Codex")
     parser.add_argument(
         "--backend", default=BACKEND_URL, help="Backend API URL"
@@ -36,9 +40,10 @@ async def main():
     args = parser.parse_args()
 
     print("=" * 50, flush=True)
-    print("Agent Shield - Codex MCP Interceptor", flush=True)
+    print("Agent Shield - Codex Runtime Interceptor", flush=True)
     print("=" * 50, flush=True)
     print(f"Backend: {args.backend}", flush=True)
+    print(f"Intercept Mode: {interceptor_mode_display()}", flush=True)
     print("=" * 50, flush=True)
     print("", flush=True)
 
@@ -47,6 +52,13 @@ async def main():
         agent_name="codex",
         verbose=args.verbose,
     )
+
+    backend_health = await interceptor.backend_client.health_check()
+    if backend_health.get("ok"):
+        print("[AgentShield] Backend health: ok", flush=True)
+    else:
+        detail = backend_health.get("http_status") or backend_health.get("error", "unreachable")
+        print(f"[AgentShield] Backend health warning: {detail}", flush=True)
 
     try:
         result = await interceptor.run(codex_args=args.codex_args)
