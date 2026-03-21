@@ -92,6 +92,12 @@ export class AgentShieldStack extends cdk.Stack {
       },
     );
 
+    const tinyfishApiKeySecretArn = new cdk.CfnParameter(this, 'TinyfishApiKeySecretArn', {
+      type: 'String',
+      description:
+        'Secrets Manager secret ARN containing the Tinyfish API key (SecretString should be the raw key)',
+    });
+
     const bedrockFoundationModelArn = new cdk.CfnParameter(this, 'BedrockFoundationModelArn', {
       type: 'String',
       description: 'Bedrock foundation model ARN to allow for InvokeModel',
@@ -113,6 +119,7 @@ export class AgentShieldStack extends cdk.Stack {
           dbSecret.secretArn,
           gitHubTokenSecretArn.valueAsString,
           firebaseServiceAccountSecretArn.valueAsString,
+          tinyfishApiKeySecretArn.valueAsString,
         ],
       }),
     );
@@ -144,6 +151,10 @@ export class AgentShieldStack extends cdk.Stack {
 
     // Allow ALB -> instance connectivity.
     backendInstance.connections.allowFrom(alb, ec2.Port.tcp(backendPort));
+    database.connections.allowDefaultPortFrom(
+      backendInstance,
+      'Allow backend instance to connect to Postgres',
+    );
 
     backendInstance.addUserData(
       'set -xeuo pipefail',
@@ -159,11 +170,12 @@ export class AgentShieldStack extends cdk.Stack {
       'cd /opt',
       // Pull GitHub token from Secrets Manager.
       `GITHUB_TOKEN=$(aws secretsmanager get-secret-value --secret-id ${gitHubTokenSecretArn.valueAsString} --query SecretString --output text)`,
+      `TINYFISH_API_KEY=$(aws secretsmanager get-secret-value --secret-id ${tinyfishApiKeySecretArn.valueAsString} --query SecretString --output text)`,
       // Use `$GITHUB_TOKEN` from the shell (not a TS interpolation).
       `rm -rf ${installDir}`,
       `git clone --depth 1 https://x-access-token:$GITHUB_TOKEN@github.com/${gitHubRepo.valueAsString}.git ${installDir}`,
-      `cd ${installDir}`,
-      // Install repo deps (root + workspaces)
+      `cd ${installDir}/server`,
+      // Install backend deps.
       'npm install',
       `cat <<EOF > /etc/agent-shield-backend.env`,
       `PORT=${backendPort}`,
@@ -173,6 +185,11 @@ export class AgentShieldStack extends cdk.Stack {
       `DATABASE_USERNAME=${dbUsername}`,
       `DATABASE_PASSWORD=$(aws secretsmanager get-secret-value --secret-id ${dbSecret.secretArn} --query SecretString --output text | jq -r .password)`,
       `FIREBASE_SERVICE_ACCOUNT_SECRET_ARN=${firebaseServiceAccountSecretArn.valueAsString}`,
+      'TINYFISH_API_KEY=$TINYFISH_API_KEY',
+      'TINYFISH_RESEARCH_URL=https://www.google.com/',
+      'TINYFISH_BROWSER_PROFILE=lite',
+      'VULNERABILITY_REFRESH_LIMIT=100',
+      'VULNERABILITY_INTEL_TABLE=agent_vulnerability_intel',
       `BEDROCK_FOUNDATION_MODEL_ARN=${bedrockFoundationModelArn.valueAsString}`,
       'EOF',
       `cat <<'EOF' > /etc/systemd/system/agent-shield-backend.service`,
@@ -183,9 +200,9 @@ export class AgentShieldStack extends cdk.Stack {
       '',
       '[Service]',
       'Type=simple',
-      `WorkingDirectory=${installDir}`,
+      `WorkingDirectory=${installDir}/server`,
       'EnvironmentFile=/etc/agent-shield-backend.env',
-      'ExecStart=/usr/bin/npm run start --workspace=server',
+      'ExecStart=/usr/bin/npm run start',
       'Restart=always',
       'RestartSec=5',
       'StandardOutput=append:/var/log/agent-shield-backend.log',
@@ -194,9 +211,38 @@ export class AgentShieldStack extends cdk.Stack {
       '[Install]',
       'WantedBy=multi-user.target',
       'EOF',
+      `cat <<'EOF' > /etc/systemd/system/agent-shield-vulnerability-refresh.service`,
+      '[Unit]',
+      'Description=Agent Shield vulnerability intel refresh',
+      'After=network-online.target agent-shield-backend.service',
+      'Wants=network-online.target',
+      '',
+      '[Service]',
+      'Type=oneshot',
+      `WorkingDirectory=${installDir}/server`,
+      'EnvironmentFile=/etc/agent-shield-backend.env',
+      'ExecStart=/usr/bin/npm run vulnerabilities:refresh',
+      'StandardOutput=append:/var/log/agent-shield-vulnerability-refresh.log',
+      'StandardError=append:/var/log/agent-shield-vulnerability-refresh.log',
+      'EOF',
+      `cat <<'EOF' > /etc/systemd/system/agent-shield-vulnerability-refresh.timer`,
+      '[Unit]',
+      'Description=Run Agent Shield vulnerability intel refresh every 2 days',
+      '',
+      '[Timer]',
+      'OnBootSec=10min',
+      'OnUnitActiveSec=2d',
+      'Persistent=true',
+      'Unit=agent-shield-vulnerability-refresh.service',
+      '',
+      '[Install]',
+      'WantedBy=timers.target',
+      'EOF',
       'systemctl daemon-reload',
       'systemctl enable --now agent-shield-backend.service',
+      'systemctl enable --now agent-shield-vulnerability-refresh.timer',
       'systemctl status --no-pager agent-shield-backend.service',
+      'systemctl status --no-pager agent-shield-vulnerability-refresh.timer || true',
     );
 
     listener.addTargets('BackendTargets', {
