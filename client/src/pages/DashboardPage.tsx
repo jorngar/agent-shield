@@ -5,7 +5,6 @@ import { StatsBar } from "@/components/dashboard/StatsBar";
 import { InterceptList } from "@/components/dashboard/InterceptList";
 import { InspectorPanel } from "@/components/dashboard/InspectorPanel";
 import { DecisionPanel } from "@/components/dashboard/DecisionPanel";
-import { DecisionButtons } from "@/components/dashboard/DecisionButtons";
 import { seedFirestore } from "@/lib/seed";
 
 const IS_DEV = import.meta.env.DEV;
@@ -78,8 +77,8 @@ export default function DashboardPage() {
           <div className="w-64 shrink-0 xl:w-72">
             <DecisionPanel
               intercept={selected}
-              onApprove={(id) => decide(id, "approved")}
-              onDeny={(id) => decide(id, "denied")}
+              onApprove={(id, reason) => decide(id, "approved", reason)}
+              onDeny={(id, reason) => decide(id, "denied", reason)}
             />
           </div>
 
@@ -115,10 +114,20 @@ export default function DashboardPage() {
               <p className="mb-2 font-mono text-[10px] text-muted-foreground/40">
                 // awaiting decision — {selected.id}
               </p>
-              <DecisionButtons
-                onApprove={() => decide(selected.id, "approved")}
-                onDeny={() => decide(selected.id, "denied")}
-              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() => decide(selected.id, "denied", "")}
+                  className="flex-1 rounded border border-risk-high bg-risk-high/10 px-4 py-2.5 font-mono text-xs font-bold uppercase tracking-widest text-risk-high hover:bg-risk-high hover:text-white active:scale-[0.98] transition-all"
+                >
+                  ✕ Deny
+                </button>
+                <button
+                  onClick={() => decide(selected.id, "approved", "")}
+                  className="flex-1 rounded border border-risk-low/40 px-4 py-2.5 font-mono text-xs font-semibold uppercase tracking-widest text-risk-low/80 hover:border-risk-low hover:bg-risk-low/10 hover:text-risk-low active:scale-[0.98] transition-all"
+                >
+                  ✓ Approve
+                </button>
+              </div>
             </div>
           )}
 

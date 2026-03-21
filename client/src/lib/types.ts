@@ -11,6 +11,7 @@ export interface Intercept {
   reason: string;
   timestamp: string;
   decidedAt?: string;
+  decisionReason?: string;
   arguments: Record<string, unknown>;
   matchedRules: string[];
 }

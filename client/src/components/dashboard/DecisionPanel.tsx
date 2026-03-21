@@ -1,6 +1,6 @@
+import { useState } from "react";
 import type { Intercept, RiskLevel } from "@/lib/types";
 import { ConfidenceBar } from "./ConfidenceBar";
-import { DecisionButtons } from "./DecisionButtons";
 
 const riskLabel: Record<RiskLevel, string> = {
   high:   "HIGH",
@@ -61,8 +61,6 @@ function EmptyDecision() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center p-5">
       <div className="w-full rounded-lg border border-border/60 bg-card p-5 text-center shadow-sm">
-
-        {/* Gavel / approve+deny icon */}
         <div className="mx-auto mb-4 flex h-11 w-11 items-center justify-center rounded-xl border border-primary/20 bg-primary/10">
           <svg
             className="h-5 w-5 text-primary"
@@ -77,14 +75,12 @@ function EmptyDecision() {
             <path d="M12 8v4l2 2" />
           </svg>
         </div>
-
         <p className="font-mono text-sm font-semibold text-foreground">
           Awaiting selection
         </p>
         <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
           Select a pending call from the stream to review and approve or deny it.
         </p>
-
         <div className="mt-4 flex items-center justify-center gap-1.5 font-mono text-[10px] text-muted-foreground/70">
           <span className="animate-cursor">_</span>
           <span>no call selected</span>
@@ -97,11 +93,32 @@ function EmptyDecision() {
 // ── Main ───────────────────────────────────────────────────────────────────
 interface DecisionPanelProps {
   intercept: Intercept | null;
-  onApprove: (id: string) => void;
-  onDeny: (id: string) => void;
+  onApprove: (id: string, reason: string) => void;
+  onDeny: (id: string, reason: string) => void;
 }
 
 export function DecisionPanel({ intercept, onApprove, onDeny }: DecisionPanelProps) {
+  const [pendingAction, setPendingAction] = useState<"approved" | "denied" | null>(null);
+  const [reasonInput, setReasonInput]     = useState("");
+
+  function handleActionClick(action: "approved" | "denied") {
+    setPendingAction(action);
+    setReasonInput("");
+  }
+
+  function handleConfirm() {
+    if (!intercept || !pendingAction) return;
+    if (pendingAction === "approved") onApprove(intercept.id, reasonInput);
+    else onDeny(intercept.id, reasonInput);
+    setPendingAction(null);
+    setReasonInput("");
+  }
+
+  function handleCancel() {
+    setPendingAction(null);
+    setReasonInput("");
+  }
+
   if (!intercept) return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-4 py-3">
@@ -113,7 +130,7 @@ export function DecisionPanel({ intercept, onApprove, onDeny }: DecisionPanelPro
     </div>
   );
 
-  const { id, riskLevel, category, confidence, reason, status, decidedAt } = intercept;
+  const { id, riskLevel, category, confidence, reason, status, decidedAt, decisionReason } = intercept;
 
   return (
     <div className="flex h-full flex-col overflow-hidden" key={id}>
@@ -167,33 +184,81 @@ export function DecisionPanel({ intercept, onApprove, onDeny }: DecisionPanelPro
 
       {/* ── Decision footer ────────────────────────────────────────────── */}
       <div className="shrink-0 border-t border-border">
-        {status === "pending" ? (
+
+        {status === "pending" && !pendingAction && (
           <div className="p-4">
             <p className="mb-3 font-mono text-[10px] text-muted-foreground/60">
               // AWAITING DECISION — {id}
             </p>
-            <DecisionButtons
-              onApprove={() => onApprove(id)}
-              onDeny={() => onDeny(id)}
-            />
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={() => handleActionClick("denied")}
+                className="w-full rounded border border-risk-high bg-risk-high/10 px-4 py-2.5 font-mono text-xs font-bold uppercase tracking-widest text-risk-high transition-all duration-150 hover:bg-risk-high hover:text-risk-high-foreground active:scale-[0.98]"
+              >
+                ✕  Deny
+              </button>
+              <button
+                onClick={() => handleActionClick("approved")}
+                className="w-full rounded border border-risk-low/40 bg-transparent px-4 py-2.5 font-mono text-xs font-semibold uppercase tracking-widest text-risk-low/80 transition-all duration-150 hover:border-risk-low hover:bg-risk-low/10 hover:text-risk-low active:scale-[0.98]"
+              >
+                ✓  Approve
+              </button>
+            </div>
           </div>
-        ) : (
-          <div className={`px-4 py-3 text-center font-mono text-xs font-bold uppercase tracking-widest
-            ${status === "approved"
-              ? "bg-risk-low/10 text-risk-low"
-              : "bg-risk-high/10 text-risk-high"
-            }`}
-          >
-            {status === "approved" ? "✓" : "✕"}  {status}
+        )}
+
+        {status === "pending" && pendingAction && (
+          <div className="p-4">
+            <p className={`mb-2 font-mono text-[10px] font-bold uppercase tracking-widest ${pendingAction === "approved" ? "text-risk-low" : "text-risk-high"}`}>
+              {pendingAction === "approved" ? "✓ Approving" : "✕ Denying"} — add reason
+            </p>
+            <textarea
+              value={reasonInput}
+              onChange={(e) => setReasonInput(e.target.value)}
+              placeholder="Reason (optional)..."
+              rows={3}
+              className="w-full resize-none rounded border border-border/60 bg-card px-3 py-2 font-mono text-xs text-foreground placeholder:text-muted-foreground/40 focus:border-primary/40 focus:outline-none"
+            />
+            <div className="mt-2 flex gap-2">
+              <button
+                onClick={handleCancel}
+                className="flex-1 rounded border border-border/60 px-3 py-2 font-mono text-xs text-muted-foreground/70 hover:border-border hover:text-foreground transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirm}
+                className={`flex-1 rounded border px-3 py-2 font-mono text-xs font-bold uppercase tracking-widest transition-all active:scale-[0.98]
+                  ${pendingAction === "approved"
+                    ? "border-risk-low bg-risk-low/10 text-risk-low hover:bg-risk-low hover:text-white"
+                    : "border-risk-high bg-risk-high/10 text-risk-high hover:bg-risk-high hover:text-white"
+                  }`}
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        )}
+
+        {status !== "pending" && (
+          <div className={`px-4 py-3 font-mono ${status === "approved" ? "bg-risk-low/10 text-risk-low" : "bg-risk-high/10 text-risk-high"}`}>
+            <div className="text-center text-xs font-bold uppercase tracking-widest">
+              {status === "approved" ? "✓" : "✕"}  {status}
+            </div>
             {decidedAt && (
-              <div className="mt-0.5 text-[10px] font-normal tracking-normal opacity-60">
+              <div className="mt-0.5 text-center text-[10px] font-normal tracking-normal opacity-60">
                 {formatDateTime(decidedAt)}
               </div>
             )}
+            {decisionReason && !/localhost|Client Error|Not Found for url|Error:/i.test(decisionReason) && (
+              <p className="mt-2 border-t border-current/20 pt-2 text-[10px] font-normal leading-relaxed tracking-normal opacity-70">
+                {decisionReason}
+              </p>
+            )}
           </div>
         )}
-      </div>
 
+      </div>
     </div>
   );
 }

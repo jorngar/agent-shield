@@ -27,11 +27,12 @@ export async function fetchAuditLog(limit = 100): Promise<ApiIntercept[]> {
 export async function patchDecision(
   interceptId: string,
   verdict: "approve" | "deny",
+  reason?: string,
 ): Promise<void> {
   const res = await fetch(`${BASE_URL}/api/intercept/${interceptId}/decision`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision: verdict }),
+    body: JSON.stringify({ decision: verdict, ...(reason ? { reason } : {}) }),
     signal: AbortSignal.timeout(8000),
   });
   if (!res.ok && res.status !== 501) {

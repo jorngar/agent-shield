@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { ref, onValue, off } from "firebase/database";
+import { ref, onValue, off, update } from "firebase/database";
 import { rtdb } from "@/lib/firebase";
 import type { Intercept, DecisionStatus } from "@/lib/types";
 import { mockIntercepts } from "@/lib/mock-data";
@@ -11,11 +11,11 @@ export interface UseInterceptsReturn {
   isLoading: boolean;
   error: string | null;
   lastUpdated: Date | null;
-  decide: (id: string, decision: Exclude<DecisionStatus, "pending">) => Promise<void>;
+  decide: (id: string, decision: Exclude<DecisionStatus, "pending">, reason?: string) => Promise<void>;
   retry: () => void;
 }
 
-// Priority: REST API > Firebase RTDB > Mock
+// Priority: Firebase RTDB > REST API > Mock
 const API_CONFIGURED      = Boolean(import.meta.env.VITE_API_URL);
 const FIREBASE_CONFIGURED = Boolean(import.meta.env.VITE_FIREBASE_DATABASE_URL);
 
@@ -59,10 +59,11 @@ function rtdbDocToIntercept(interceptId: string, data: Record<string, unknown>):
     timestamp:    typeof data.timestamp === "number"
                     ? new Date(data.timestamp).toISOString()
                     : new Date().toISOString(),
-    decidedAt:    data.decided_at
-                    ? new Date(data.decided_at as number).toISOString()
-                    : undefined,
-    arguments:    parsedArgs,
+    decidedAt:      data.decided_at
+                      ? new Date(data.decided_at as number).toISOString()
+                      : undefined,
+    decisionReason: data.decision_reason ? String(data.decision_reason) : undefined,
+    arguments:      parsedArgs,
     matchedRules: Array.isArray(risk.flags)
                     ? (risk.flags as string[])
                     : [String(data.reason ?? "").slice(0, 40)],
@@ -85,11 +86,11 @@ function useMockIntercepts(): UseInterceptsReturn {
   }, []);
 
   const decide = useCallback(
-    async (id: string, decision: Exclude<DecisionStatus, "pending">) => {
+    async (id: string, decision: Exclude<DecisionStatus, "pending">, reason?: string) => {
       setIntercepts((prev) =>
         prev.map((i) =>
           i.id === id
-            ? { ...i, status: decision, decidedAt: new Date().toISOString() }
+            ? { ...i, status: decision, decidedAt: new Date().toISOString(), decisionReason: reason }
             : i
         )
       );
@@ -140,21 +141,31 @@ function useRtdbIntercepts(): UseInterceptsReturn {
   }, [retryKey]);
 
   const decide = useCallback(
-    async (id: string, decision: Exclude<DecisionStatus, "pending">) => {
-      const verdict = decision === "approved" ? "approve" : "deny";
+    async (id: string, decision: Exclude<DecisionStatus, "pending">, reason?: string) => {
+      const verdict   = decision === "approved" ? "approve" : "deny";
+      const decidedAt = new Date().toISOString();
 
       // Optimistic update
       setIntercepts((prev) =>
         prev.map((i) =>
           i.id === id
-            ? { ...i, status: decision, decidedAt: new Date().toISOString() }
+            ? { ...i, status: decision, decidedAt, decisionReason: reason }
             : i
         )
       );
       setLastUpdated(new Date());
 
-      // id IS the intercept_id UUID from RTDB — correct for the backend endpoint
-      await patchDecision(id, verdict);
+      // Write decision directly to RTDB so it persists across refreshes
+      await update(ref(rtdb, `intercepts/${id}`), {
+        verdict,
+        status:          "decided",
+        user_selected:   verdict,
+        decision_reason: reason ?? "",
+        decided_at:      Date.now(),
+      });
+
+      // Also notify backend REST API (best-effort — may 404 until deployed)
+      patchDecision(id, verdict, reason).catch(() => {});
     },
     []
   );
@@ -169,14 +180,14 @@ function useRtdbIntercepts(): UseInterceptsReturn {
   };
 }
 
-// ── Dispatcher: API > RTDB > Mock ────────────────────────────────────────────
+// ── Dispatcher: RTDB > REST API > Mock ───────────────────────────────────────
 // Rules-of-hooks: all three must always be called; we select after.
 export function useIntercepts(): UseInterceptsReturn {
   const api  = useApiIntercepts();
   const rtdb = useRtdbIntercepts();
   const mock = useMockIntercepts();
 
-  if (API_CONFIGURED)      return api;
   if (FIREBASE_CONFIGURED) return rtdb;
+  if (API_CONFIGURED)      return api;
   return mock;
 }

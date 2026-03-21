@@ -9,7 +9,7 @@ interface UseInterceptsReturn {
   isLoading: boolean;
   error: string | null;
   lastUpdated: Date | null;
-  decide: (id: string, decision: Exclude<DecisionStatus, "pending">) => Promise<void>;
+  decide: (id: string, decision: Exclude<DecisionStatus, "pending">, reason?: string) => Promise<void>;
   retry: () => void;
 }
 
@@ -19,13 +19,27 @@ export function useApiIntercepts(): UseInterceptsReturn {
   const [error, setError]             = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  const timerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const retryKeyRef = useRef(0);
+  const timerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryKeyRef    = useRef(0);
+  // Track local decisions so polls don't overwrite them
+  const localDecisions = useRef<Map<string, { status: Exclude<DecisionStatus, "pending">; decidedAt: string }>>(new Map());
 
   const poll = useCallback(async () => {
     try {
       const data = await fetchAuditLog(100);
-      setIntercepts(data.map(mapApiIntercept));
+      setIntercepts(
+        data.map(mapApiIntercept).map((intercept) => {
+          const local = localDecisions.current.get(intercept.id);
+          // If backend has caught up with the decision, clear the local override
+          if (local && intercept.status !== "pending") {
+            localDecisions.current.delete(intercept.id);
+            return intercept;
+          }
+          // Otherwise preserve the local optimistic decision
+          if (local) return { ...intercept, status: local.status, decidedAt: local.decidedAt };
+          return intercept;
+        })
+      );
       setLastUpdated(new Date());
       setError(null);
     } catch (e) {
@@ -47,24 +61,21 @@ export function useApiIntercepts(): UseInterceptsReturn {
   }, [poll, retryKeyRef.current]);
 
   const decide = useCallback(
-    async (id: string, decision: Exclude<DecisionStatus, "pending">) => {
-      const verdict = decision === "approved" ? "approve" : "deny";
+    async (id: string, decision: Exclude<DecisionStatus, "pending">, reason?: string) => {
+      const verdict   = decision === "approved" ? "approve" : "deny";
+      const decidedAt = new Date().toISOString();
 
-      // Optimistic update immediately
+      localDecisions.current.set(id, { status: decision, decidedAt });
+
       setIntercepts((prev) =>
-        prev.map((i) =>
-          i.id === id
-            ? { ...i, status: decision, decidedAt: new Date().toISOString() }
-            : i
-        )
+        prev.map((i) => i.id === id ? { ...i, status: decision, decidedAt, decisionReason: reason } : i)
       );
       setLastUpdated(new Date());
 
       try {
-        await patchDecision(Number(id), verdict);
+        await patchDecision(id, verdict, reason);
       } catch {
-        // PATCH /audit/:id/decision not yet built — optimistic update stands
-        // until next poll corrects it if needed
+        // Decision preserved locally until backend catches up
       }
     },
     []
