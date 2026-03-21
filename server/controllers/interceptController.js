@@ -3,7 +3,7 @@ const firebaseDb = require("../configs/firebase");
 const evaluate = require("../helpers/evaluate");
 const { randomUUID } = require("node:crypto");
 
-exports.intercept = (req, res) => {
+exports.intercept = async (req, res) => {
   const { session_id, agent, action_type, content, risk } = req.body;
 
   if (!session_id || !agent || !action_type || !content || !risk) {
@@ -12,7 +12,7 @@ exports.intercept = (req, res) => {
       .json({ error: "Missing required fields: session_id, agent, action_type, content, risk" });
   }
 
-  const { verdict, reason } = evaluate({ session_id, agent, action_type, content, risk }, risk);
+  const { verdict, reason } = await evaluate({ session_id, agent, action_type, content, risk }, risk);
   const interceptId = randomUUID();
   const status = verdict === "pending" ? "pending" : "decided";
 
@@ -129,7 +129,6 @@ exports.resolveDecision = (req, res) => {
     );
   }
 
-  // Update Firebase so dashboard sees the decision in real-time
   firebaseDb.ref(`intercepts/${id}`).update({
     verdict: decision,
     status: "decided",
