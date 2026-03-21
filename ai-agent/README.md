@@ -62,12 +62,14 @@ Codex command resolution:
    - `cp .env-example .env`
    - `set -a; source .env; set +a`
 3. Start backend service (default expected URL: `http://localhost:3000`).
+   - For AWS/API Gateway deployment, set `AGENT_SHIELD_BACKEND_URL` to your API endpoint instead of using `localhost`.
 
 ## Run
 
 - Direct:
   - `python3 cli.py --backend http://localhost:3000`
   - `python3 cli.py --backend http://localhost:3000 -- --help`
+  - `AGENT_SHIELD_BACKEND_URL=https://n73h8lxc41.execute-api.ap-southeast-1.amazonaws.com python3 cli.py`
 - Via npm scripts:
   - `npm run dev -- --help`
 
@@ -78,7 +80,7 @@ Run tests:
 
 `python3 cli.py [--backend URL] [--verbose] [codex_args ...]`
 
-- `--backend`: backend API base URL (default: `http://localhost:3000`)
+- `--backend`: backend API base URL (default: `AGENT_SHIELD_BACKEND_URL` or `http://localhost:3000`)
 - `--verbose` / `-v`: mirror interceptor logs to stderr (logs are always written to `AGENT_SHIELD_LOG_FILE`)
 - `codex_args`: forwarded to Codex invocation
 
@@ -102,6 +104,7 @@ Exit behavior:
 
 Whitelist behavior:
 - Backend URL and Ollama URL are auto-whitelisted (including localhost aliases) to prevent self-block loops.
+- For AWS deployment, the wrapper only needs `AgentShieldStack.ApiEndpoint`; `ClusterName`, `DatabaseEndpoint`, and `LoadBalancerDns` are backend/ops values, not wrapper config.
 - Explicit whitelist env vars extend the auto-whitelist.
 
 ## Backend API

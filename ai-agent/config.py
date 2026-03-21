@@ -1,9 +1,21 @@
 import os
 import shlex
 
-OLLAMA_HOST = os.getenv("AGENT_SHIELD_OLLAMA_HOST", "http://localhost:11434")
+
+def _normalize_url(value: str, default: str) -> str:
+    normalized = (value or "").strip() or default
+    return normalized.rstrip("/")
+
+
+OLLAMA_HOST = _normalize_url(
+    os.getenv("AGENT_SHIELD_OLLAMA_HOST", "http://localhost:11434"),
+    "http://localhost:11434",
+)
 OLLAMA_MODEL = os.getenv("AGENT_SHIELD_OLLAMA_MODEL", "qwen3.5:0.8b")
-BACKEND_URL = os.getenv("AGENT_SHIELD_BACKEND_URL", "http://localhost:3000")
+BACKEND_URL = _normalize_url(
+    os.getenv("AGENT_SHIELD_BACKEND_URL", "http://localhost:3000"),
+    "http://localhost:3000",
+)
 
 # Use local `codex` binary by default and fall back in runtime if unavailable.
 CODEX_COMMAND = shlex.split(os.getenv("AGENT_SHIELD_CODEX_COMMAND", "codex"))

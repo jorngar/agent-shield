@@ -8,7 +8,7 @@ class BackendClient:
     """Client for the Node Express backend API."""
 
     def __init__(self, base_url: str = BACKEND_URL):
-        self.base_url = base_url
+        self.base_url = (base_url or BACKEND_URL).rstrip("/")
         self.timeout = 5.0
 
     async def submit_intercept(

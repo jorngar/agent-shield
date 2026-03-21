@@ -16,6 +16,7 @@ Usage:
 import argparse
 import asyncio
 import sys
+from config import BACKEND_URL
 from mcp_interceptor import create_interceptor
 
 
@@ -23,7 +24,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Agent Shield - Codex MCP Interceptor")
     parser.add_argument("codex_args", nargs="*", help="Arguments to pass to Codex")
     parser.add_argument(
-        "--backend", default="http://localhost:3000", help="Backend API URL"
+        "--backend", default=BACKEND_URL, help="Backend API URL"
     )
     parser.add_argument(
         "--verbose",
