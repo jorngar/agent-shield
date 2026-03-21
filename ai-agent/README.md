@@ -22,9 +22,11 @@ At a high level the wrapper does this:
 Important runtime semantics:
 - Intercept decisions are fail-closed. Submission failures, missing `intercept_id`, or polling timeout all resolve to `deny`.
 - Local risk triage runs first. Low-risk `approve` results are allowed locally, high-risk `deny` results are blocked locally, and only the uncertain review band is escalated to the backend.
+- Review-band events can fail gracefully when the backend is degraded. By default, backend submit errors, backend `502`s, and unresolved review timeouts fall back to local `approve` for a short cooldown window instead of terminating the session.
 - Backend health checks are best effort. Startup continues even if `GET /api/health` fails.
 - Final session reporting is best effort. A failed `POST /api/session/result` does not change the already computed wrapper result.
 - A denied intercept can intentionally terminate Codex. In that case the raw child exit may be a signal such as `-9`, but the wrapper reports the session as `blocked` rather than `failed`.
+- Denied root-process network events are soft-blocked and audited without killing Codex. Denied child-process network events and denied process spawns still enforce hard termination of the offending process tree.
 - Backend and Ollama traffic is auto-whitelisted by hostname, localhost alias, and resolved IP address so the wrapper does not self-intercept its own approval and risk-analysis calls.
 - Logs go to `.agent-shield.log` by default so Codex TUI output stays clean unless `--verbose` is used.
 
@@ -153,6 +155,8 @@ Codex argument compatibility:
 - `AGENT_SHIELD_PROCESS_SCAN_INTERVAL_SEC`: descendant scan cadence in seconds, default `0.1`, minimum `0.05`
 - `AGENT_SHIELD_LOCAL_APPROVE_MAX_SCORE`: highest score eligible for local auto-approve, default `25`
 - `AGENT_SHIELD_LOCAL_DENY_MIN_SCORE`: lowest score eligible for local auto-deny, default `75`
+- `AGENT_SHIELD_CLOUD_REVIEW_FAILURE_MODE`: fallback decision for review-band backend failures, `approve` or `deny`, default `approve`
+- `AGENT_SHIELD_BACKEND_DEGRADED_COOLDOWN_SEC`: how long the wrapper suppresses backend escalation after a review-path backend failure, default `30`
 - `AGENT_SHIELD_RESPONSES_API_HOSTS`: comma-separated hostnames treated as model-provider API destinations, default `api.openai.com`
 
 ### Logging and allowlists

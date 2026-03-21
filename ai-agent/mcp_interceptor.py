@@ -17,7 +17,9 @@ from urllib.parse import urlparse
 
 from api_client import BackendClient
 from config import (
+    BACKEND_DEGRADED_COOLDOWN_SEC,
     BACKEND_URL,
+    CLOUD_REVIEW_FAILURE_MODE,
     INTERCEPTABLE_PORTS,
     INTERCEPT_MODE,
     LOCAL_APPROVE_MAX_SCORE,
@@ -75,6 +77,7 @@ class MCPInterceptor:
         self._scheduled_futures_lock = threading.Lock()
         self._intercept_semaphore: Optional[asyncio.Semaphore] = None
         self._shield_terminated_root = False
+        self._backend_degraded_until = 0.0
         (
             self._whitelist_hosts,
             self._whitelist_ports,
@@ -404,6 +407,31 @@ class MCPInterceptor:
 
         return True
 
+    def _should_skip_internal_network_connection(
+        self,
+        cmdline: str,
+        local_host: str,
+        local_port: Optional[int],
+        remote_host: str,
+        remote_port: Optional[int],
+    ) -> bool:
+        if not (
+            self._is_internal_network_host(local_host or "")
+            and self._is_internal_network_host(remote_host or "")
+        ):
+            return False
+
+        is_mcp_process, _, _ = self.mcp_detector.scan_content(cmdline)
+        if is_mcp_process:
+            return False
+
+        if self._matches_intercept_target(local_host, local_port):
+            return False
+        if self._matches_intercept_target(remote_host, remote_port):
+            return False
+
+        return True
+
     def _is_whitelisted_command(self, cmdline: str) -> bool:
         lowered = cmdline.lower()
         return any(pattern in lowered for pattern in self._whitelist_command_patterns)
@@ -715,6 +743,27 @@ class MCPInterceptor:
         except ValueError:
             return False
 
+    @classmethod
+    def _is_internal_network_host(cls, host: str) -> bool:
+        normalized = host.strip().lower()
+        if not normalized:
+            return False
+        if cls._is_local_host(normalized):
+            return True
+
+        try:
+            address = ipaddress.ip_address(normalized)
+        except ValueError:
+            return False
+
+        return (
+            address.is_private
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        )
+
     def _classify_connection_candidate(
         self,
         cmdline: str,
@@ -776,6 +825,15 @@ class MCPInterceptor:
         ):
             return False, "", "local_internal_connection", {}
 
+        if self._should_skip_internal_network_connection(
+            cmdline=cmdline,
+            local_host=local_host,
+            local_port=parsed_local_port,
+            remote_host=remote_host,
+            remote_port=parsed_port,
+        ):
+            return False, "", "internal_network_connection", {}
+
         looks_like_responses_api, responses_reason = (
             self._looks_like_responses_api_connection(
                 cmdline=cmdline,
@@ -835,6 +893,9 @@ class MCPInterceptor:
         if self.process and pid == self.process.pid:
             self._shield_terminated_root = True
 
+    def _should_soft_block_root_connection(self, pid: int, process_role: str) -> bool:
+        return bool(self.process and pid == self.process.pid and process_role == "root")
+
     @staticmethod
     def _coerce_risk_score(value: Any) -> int:
         try:
@@ -863,6 +924,24 @@ class MCPInterceptor:
             return "deny", "local_high_risk_auto_deny"
 
         return None, "cloud_review_required"
+
+    def _is_backend_degraded(self) -> bool:
+        return time.time() < self._backend_degraded_until
+
+    def _mark_backend_degraded(self, reason: str) -> None:
+        self._backend_degraded_until = time.time() + BACKEND_DEGRADED_COOLDOWN_SEC
+        self._log(
+            "Backend review degraded; using graceful fallback temporarily: "
+            f"reason={reason}; cooldown_sec={BACKEND_DEGRADED_COOLDOWN_SEC}",
+            level="WARNING",
+        )
+
+    def _resolve_cloud_review_failure_fallback(
+        self, failure_reason: str
+    ) -> Tuple[str, str]:
+        if CLOUD_REVIEW_FAILURE_MODE == "deny":
+            return "deny", f"cloud_review_failure_{failure_reason}_deny"
+        return "approve", f"cloud_review_failure_{failure_reason}_approve"
 
     @staticmethod
     def _format_codex_exit_display(
@@ -897,6 +976,17 @@ class MCPInterceptor:
                 level="DEBUG",
             )
             return None, local_decision, "local", decision_reason
+
+        if self._is_backend_degraded():
+            fallback_decision, fallback_reason = self._resolve_cloud_review_failure_fallback(
+                "backend_degraded"
+            )
+            self._log(
+                "Skipping backend escalation during degraded window: "
+                f"action_type={action_type}; decision={fallback_decision}; reason={fallback_reason}",
+                level="WARNING",
+            )
+            return None, fallback_decision, "cloud_fallback", fallback_reason
 
         self._log(
             "Escalating intercept to backend for cloud review: "
@@ -939,10 +1029,32 @@ class MCPInterceptor:
                 level="DEBUG",
             )
         else:
+            self._mark_backend_degraded(
+                result.get("error")
+                or f"http_status_{result.get('http_status')}"
+                or "submit_error"
+            )
+            fallback_decision, fallback_reason = self._resolve_cloud_review_failure_fallback(
+                "submit_error"
+            )
             self._log(
-                f"Intercept submission produced no intercept_id; defaulting to {final_decision}",
+                "Intercept submission produced no intercept_id; "
+                f"using graceful fallback decision={fallback_decision}; reason={fallback_reason}",
                 level="WARNING",
             )
+            return None, fallback_decision, "cloud_fallback", fallback_reason
+
+        if decision.get("timeout"):
+            self._mark_backend_degraded("decision_timeout")
+            fallback_decision, fallback_reason = self._resolve_cloud_review_failure_fallback(
+                "decision_timeout"
+            )
+            self._log(
+                "Decision polling timed out; "
+                f"using graceful fallback decision={fallback_decision}; reason={fallback_reason}",
+                level="WARNING",
+            )
+            return intercept_id, fallback_decision, "cloud_fallback", fallback_reason
 
         return intercept_id, final_decision, "cloud", decision_reason
 
@@ -1182,12 +1294,18 @@ class MCPInterceptor:
             )
 
             if final_decision == "deny":
-                self._log(
-                    f"BLOCKED connection - {risk.get('summary')} (source={decision_source}, reason={decision_reason})"
-                )
                 self.blocked_count += 1
-                self._record_shield_termination(pid)
-                await asyncio.to_thread(self._kill_process_tree, pid)
+                if self._should_soft_block_root_connection(pid, process_role):
+                    self._log(
+                        "SOFT-BLOCKED root connection - "
+                        f"{risk.get('summary')} (source={decision_source}, reason={decision_reason})"
+                    )
+                else:
+                    self._log(
+                        f"BLOCKED connection - {risk.get('summary')} (source={decision_source}, reason={decision_reason})"
+                    )
+                    self._record_shield_termination(pid)
+                    await asyncio.to_thread(self._kill_process_tree, pid)
             else:
                 self._log(
                     f"APPROVED connection (source={decision_source}, reason={decision_reason})"
@@ -1215,6 +1333,12 @@ class MCPInterceptor:
                     "detection_reason": detection_reason,
                     "decision_source": decision_source,
                     "decision_reason": decision_reason,
+                    "enforcement_mode": (
+                        "soft"
+                        if final_decision == "deny"
+                        and self._should_soft_block_root_connection(pid, process_role)
+                        else "hard"
+                    ),
                 }
             )
 

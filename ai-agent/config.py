@@ -133,6 +133,20 @@ except ValueError:
     LOCAL_DENY_MIN_SCORE = 75
 LOCAL_DENY_MIN_SCORE = max(0, min(100, LOCAL_DENY_MIN_SCORE))
 
+CLOUD_REVIEW_FAILURE_MODE = (
+    os.getenv("AGENT_SHIELD_CLOUD_REVIEW_FAILURE_MODE", "approve").strip().lower()
+)
+if CLOUD_REVIEW_FAILURE_MODE not in {"approve", "deny"}:
+    CLOUD_REVIEW_FAILURE_MODE = "approve"
+
+try:
+    BACKEND_DEGRADED_COOLDOWN_SEC = float(
+        os.getenv("AGENT_SHIELD_BACKEND_DEGRADED_COOLDOWN_SEC", "30")
+    )
+except ValueError:
+    BACKEND_DEGRADED_COOLDOWN_SEC = 30.0
+BACKEND_DEGRADED_COOLDOWN_SEC = max(0.0, BACKEND_DEGRADED_COOLDOWN_SEC)
+
 LOG_FILE = os.getenv("AGENT_SHIELD_LOG_FILE", ".agent-shield.log").strip()
 
 

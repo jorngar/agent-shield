@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
+const Module = require("node:module");
 
 process.env.AGENT_SHIELD_DB_PATH = ":memory:";
 process.env.TINYFISH_API_KEY = "test-api-key";
@@ -53,6 +54,39 @@ test("GET /api/audit returns audit entries", async () => {
 
     const body = await response.json();
     assert.ok(Array.isArray(body));
+  });
+});
+
+test("auth dependency failures do not take down shield routes", async (t) => {
+  const originalLoad = Module._load;
+  Module._load = function patchedLoad(request, parent, isMain) {
+    if (
+      request === "../controllers/authController" &&
+      parent &&
+      parent.filename &&
+      parent.filename.endsWith("/server/routes/authRoutes.js")
+    ) {
+      throw new Error("firebase unavailable");
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+
+  t.after(() => {
+    Module._load = originalLoad;
+  });
+
+  await withServer(async (baseUrl) => {
+    const healthResponse = await fetch(`${baseUrl}/api/health`);
+    assert.equal(healthResponse.status, 200);
+
+    const authResponse = await fetch(`${baseUrl}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "x", password: "y" }),
+    });
+
+    assert.equal(authResponse.status, 503);
+    assert.deepEqual(await authResponse.json(), { error: "Auth unavailable" });
   });
 });
 
