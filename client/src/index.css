@@ -269,4 +269,183 @@
 .animate-risk-glow-red  { animation: risk-glow-red 2.4s ease-in-out infinite; }
 .animate-risk-glow-amb  { animation: risk-glow-amb 2.4s ease-in-out infinite; }
 .animate-slide-up-fade  { animation: slide-up-fade 0.35s ease-out both; }
-.animate-cursor         { animation: typewriter-cursor 1s step-end infinite; }
+@keyframes key-press-once {
+    0% {
+        transform: translateY(0);
+        box-shadow: 0 3px 0 0 oklch(0.36 0.05 230);
+        border-color: oklch(0.36 0.05 230);
+        background: var(--secondary);
+    }
+    30% {
+        transform: translateY(3px) scale(0.97);
+        box-shadow: 0 0 0 0 oklch(0.58 0.09 214);
+        border-color: oklch(0.58 0.09 214);
+        background: oklch(0.58 0.09 214 / 0.15);
+    }
+    60% {
+        transform: translateY(3px) scale(0.97);
+        box-shadow: 0 0 0 0 oklch(0.58 0.09 214);
+        border-color: oklch(0.58 0.09 214);
+        background: oklch(0.58 0.09 214 / 0.15);
+    }
+    100% {
+        transform: translateY(0);
+        box-shadow: 0 3px 0 0 oklch(0.36 0.05 230);
+        border-color: oklch(0.36 0.05 230);
+        background: var(--secondary);
+    }
+}
+
+.animate-cursor              { animation: typewriter-cursor 1s step-end infinite; }
+.animate-key-press-once      { animation: key-press-once 600ms ease-in-out forwards; }
+
+/* ─── Showcase Section (smooth scroll template) ────────────────────────────── */
+.showcase-root {
+    background: oklch(0.115 0.042 238);
+    color: oklch(0.976 0.007 220);
+    overflow: hidden;
+}
+
+.showcase-container {
+    width: 95%;
+    margin: auto;
+}
+
+.showcase-vertical {
+    height: 200vh;
+    width: 100vw;
+    padding: 50px 0;
+}
+
+.showcase-v-content {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+}
+
+.showcase-v-left {
+    width: 50%;
+    height: 100%;
+}
+
+.showcase-v-right {
+    width: 40%;
+}
+
+.showcase-heading {
+    font-family: 'Geist Variable', sans-serif;
+    font-size: clamp(40px, 5vw, 68px);
+    font-weight: 900;
+    line-height: 85%;
+    border-left: 3px solid oklch(0.592 0.095 214);
+    padding: 25px;
+    margin: 0;
+    text-transform: uppercase;
+}
+
+.showcase-heading span {
+    display: block;
+}
+
+.showcase-subheading {
+    font-family: 'Geist Variable', sans-serif;
+    font-size: 20px;
+    font-weight: 700;
+    color: oklch(0.592 0.095 214);
+    line-height: 100%;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}
+
+.showcase-body {
+    font-size: 16px;
+    line-height: 1.6;
+    color: oklch(0.880 0.014 220);
+}
+
+.showcase-v-item:not(:last-child) {
+    margin-bottom: 240px;
+}
+
+/* ── Horizontal carousel ───────────────────────────────────────────────────── */
+.showcase-horizontal {
+    padding: 100px 0;
+}
+
+.showcase-h-content {
+    display: flex;
+}
+
+.showcase-h-item {
+    border: 1px solid oklch(0.360 0.050 230);
+    padding: 160px 120px;
+    min-width: 60vw;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 16px;
+}
+
+.showcase-h-item:not(:last-child) {
+    margin-right: 50px;
+}
+
+.showcase-h-icon {
+    width: 56px;
+    height: 56px;
+    color: oklch(0.592 0.095 214);
+}
+
+.showcase-h-label {
+    font-size: 32px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.showcase-h-desc {
+    font-size: 18px;
+    color: oklch(0.880 0.014 220);
+}
+
+/* ── 5th card: Dashboard CTA with blurred background ───────────────────── */
+.showcase-h-cta {
+    position: relative;
+    overflow: hidden;
+    text-decoration: none;
+    color: oklch(0.976 0.007 220);
+    border-color: oklch(0.592 0.095 214);
+    cursor: pointer;
+    transition: border-color 0.3s ease;
+}
+
+.showcase-h-cta:hover {
+    border-color: oklch(0.70 0.095 214);
+}
+
+.showcase-h-cta-bg {
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(circle at 30% 40%, oklch(0.592 0.095 214 / 0.25) 0%, transparent 60%),
+        radial-gradient(circle at 70% 60%, oklch(0.860 0.110 158 / 0.15) 0%, transparent 50%),
+        radial-gradient(circle at 50% 80%, oklch(0.765 0.158 62 / 0.10) 0%, transparent 40%);
+    filter: blur(40px);
+    pointer-events: none;
+}
+
+.showcase-h-cta-content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+}
+
+.showcase-h-cta:hover .showcase-h-icon {
+    color: oklch(0.860 0.110 158);
+    transition: color 0.3s ease;
+}
