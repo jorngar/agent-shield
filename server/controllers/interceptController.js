@@ -1,8 +1,9 @@
 const db = require("../configs/db");
+const firebaseDb = require("../configs/firebase");
 const evaluate = require("../helpers/evaluate");
 const { randomUUID } = require("node:crypto");
 
-exports.intercept = (req, res) => {
+exports.intercept = async (req, res) => {
   const { session_id, agent, action_type, content, risk } = req.body;
 
   if (!session_id || !agent || !action_type || !content || !risk) {
@@ -11,7 +12,7 @@ exports.intercept = (req, res) => {
       .json({ error: "Missing required fields: session_id, agent, action_type, content, risk" });
   }
 
-  const { verdict, reason } = evaluate(risk);
+  const { verdict, reason } = await evaluate({ session_id, agent, action_type, content, risk }, risk);
   const interceptId = randomUUID();
   const status = verdict === "pending" ? "pending" : "decided";
 
@@ -52,6 +53,25 @@ exports.intercept = (req, res) => {
     reason,
     result.lastInsertRowid,
   );
+
+  // Push to Firebase for real-time dashboard
+  const firebaseData = {
+    intercept_id: interceptId,
+    session_id,
+    agent,
+    action_type,
+    content,
+    risk,
+    verdict,
+    reason,
+    status,
+    user_selected: null,
+    timestamp: Date.now(),
+  };
+
+  firebaseDb.ref(`intercepts/${interceptId}`).set(firebaseData).catch((err) => {
+    console.error("Firebase write failed:", err.message);
+  });
 
   res.json({ intercept_id: interceptId, status });
 };
@@ -108,6 +128,16 @@ exports.resolveDecision = (req, res) => {
       existing.audit_log_id,
     );
   }
+
+  firebaseDb.ref(`intercepts/${id}`).update({
+    verdict: decision,
+    status: "decided",
+    reason: resolvedReason,
+    user_selected: decision,
+    decided_at: Date.now(),
+  }).catch((err) => {
+    console.error("Firebase update failed:", err.message);
+  });
 
   return res.json({
     intercept_id: id,
