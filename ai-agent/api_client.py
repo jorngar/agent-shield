@@ -1,5 +1,6 @@
 import httpx
 import asyncio
+import json
 from typing import Dict, Any
 from config import BACKEND_URL
 
@@ -21,6 +22,16 @@ class BackendClient:
     def _debug(self, message: str) -> None:
         if callable(self.debug_hook):
             self.debug_hook(message)
+
+    @staticmethod
+    def _truncate_payload_for_log(payload: Any, max_len: int = 500) -> str:
+        try:
+            text = json.dumps(payload, default=str)
+        except (TypeError, ValueError):
+            text = str(payload)
+        if len(text) > max_len:
+            return text[:max_len] + "...(truncated)"
+        return text
 
     async def health_check(self) -> Dict[str, Any]:
         async with httpx.AsyncClient() as client:
@@ -89,15 +100,23 @@ class BackendClient:
             request_url = self._api_url("/intercept")
             try:
                 self._debug(
-                    f"POST {request_url} submit_intercept start action_type={action_type}"
+                    f"POST {request_url} submit_intercept start "
+                    f"action_type={action_type}; "
+                    f"session_id={session_id}; "
+                    f"risk_level={risk.get('risk_level')}; "
+                    f"risk_score={risk.get('risk_score')}; "
+                    f"payload={self._truncate_payload_for_log(payload)}"
                 )
                 response = await client.post(
                     request_url,
                     json=payload,
                     timeout=self.timeout,
                 )
+                response_preview = response.text[:500] if response.text else "(empty)"
                 self._debug(
-                    f"POST {request_url} submit_intercept -> {response.status_code}"
+                    f"POST {request_url} submit_intercept -> "
+                    f"status={response.status_code}; "
+                    f"body={response_preview}"
                 )
                 if response.is_error:
                     return {
@@ -146,18 +165,30 @@ class BackendClient:
                         request_url,
                         timeout=self.timeout,
                     )
+                    response_preview = response.text[:300] if response.text else "(empty)"
                     self._debug(
-                        f"GET {request_url} poll_decision -> {response.status_code}"
+                        f"GET {request_url} poll_decision -> "
+                        f"status={response.status_code}; body={response_preview}"
                     )
                     if response.is_error:
                         continue
                     data = response.json()
                     data["request_url"] = request_url
                     if data.get("decision") in ("approve", "deny"):
+                        self._debug(
+                            f"GET {request_url} poll_decision resolved: "
+                            f"decision={data['decision']}; intercept_id={intercept_id}"
+                        )
                         return data
-                except (httpx.HTTPError, ValueError):
+                except (httpx.HTTPError, ValueError) as exc:
+                    self._debug(
+                        f"GET {request_url} poll_decision error: {exc}"
+                    )
                     continue
 
+            self._debug(
+                f"poll_decision timed out after {max_attempts} attempts for intercept_id={intercept_id}"
+            )
             return {"intercept_id": intercept_id, "decision": "deny", "timeout": True}
 
     async def report_session_result(
@@ -182,20 +213,26 @@ class BackendClient:
         async with httpx.AsyncClient() as client:
             try:
                 request_url = self._api_url("/session/result")
+                report_payload = {
+                    "session_id": session_id,
+                    "status": status,
+                    "intercepts": intercepts,
+                }
                 self._debug(
-                    f"POST {request_url} report_session_result start status={status}"
+                    f"POST {request_url} report_session_result start "
+                    f"status={status}; "
+                    f"intercept_count={len(intercepts)}; "
+                    f"payload={self._truncate_payload_for_log(report_payload)}"
                 )
                 response = await client.post(
                     request_url,
-                    json={
-                        "session_id": session_id,
-                        "status": status,
-                        "intercepts": intercepts,
-                    },
+                    json=report_payload,
                     timeout=self.timeout,
                 )
+                response_preview = response.text[:500] if response.text else "(empty)"
                 self._debug(
-                    f"POST {request_url} report_session_result -> {response.status_code}"
+                    f"POST {request_url} report_session_result -> "
+                    f"status={response.status_code}; body={response_preview}"
                 )
                 if response.is_error:
                     return {

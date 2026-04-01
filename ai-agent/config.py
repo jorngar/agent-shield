@@ -88,6 +88,45 @@ OLLAMA_HOST = _normalize_url(
     "http://localhost:11434",
 )
 OLLAMA_MODEL = os.getenv("AGENT_SHIELD_OLLAMA_MODEL", "qwen3.5:0.8b")
+
+try:
+    OLLAMA_TIMEOUT = float(os.getenv("AGENT_SHIELD_OLLAMA_TIMEOUT", "60"))
+except ValueError:
+    OLLAMA_TIMEOUT = 60.0
+OLLAMA_TIMEOUT = max(10.0, OLLAMA_TIMEOUT)
+
+try:
+    OLLAMA_CONNECT_TIMEOUT = float(
+        os.getenv("AGENT_SHIELD_OLLAMA_CONNECT_TIMEOUT", "5")
+    )
+except ValueError:
+    OLLAMA_CONNECT_TIMEOUT = 5.0
+OLLAMA_CONNECT_TIMEOUT = max(1.0, OLLAMA_CONNECT_TIMEOUT)
+
+try:
+    OLLAMA_RETRY_COUNT = int(os.getenv("AGENT_SHIELD_OLLAMA_RETRY_COUNT", "1"))
+except ValueError:
+    OLLAMA_RETRY_COUNT = 1
+OLLAMA_RETRY_COUNT = max(0, min(3, OLLAMA_RETRY_COUNT))
+
+OLLAMA_KEEP_ALIVE = os.getenv("AGENT_SHIELD_OLLAMA_KEEP_ALIVE", "15m").strip() or "15m"
+
+try:
+    OLLAMA_MAX_CONTENT_CHARS = int(
+        os.getenv("AGENT_SHIELD_OLLAMA_MAX_CONTENT_CHARS", "400")
+    )
+except ValueError:
+    OLLAMA_MAX_CONTENT_CHARS = 400
+OLLAMA_MAX_CONTENT_CHARS = max(100, OLLAMA_MAX_CONTENT_CHARS)
+
+try:
+    OLLAMA_MAX_CONTEXT_CHARS = int(
+        os.getenv("AGENT_SHIELD_OLLAMA_MAX_CONTEXT_CHARS", "700")
+    )
+except ValueError:
+    OLLAMA_MAX_CONTEXT_CHARS = 700
+OLLAMA_MAX_CONTEXT_CHARS = max(100, OLLAMA_MAX_CONTEXT_CHARS)
+
 BACKEND_URL = _normalize_backend_url(
     os.getenv("AGENT_SHIELD_BACKEND_URL", "http://localhost:3000"),
     "http://localhost:3000",
@@ -95,11 +134,36 @@ BACKEND_URL = _normalize_backend_url(
 
 # Use local `codex` binary by default and fall back in runtime if unavailable.
 CODEX_COMMAND = shlex.split(os.getenv("AGENT_SHIELD_CODEX_COMMAND", "codex"))
-CODEX_ARGS = _normalize_codex_args(shlex.split(os.getenv("AGENT_SHIELD_CODEX_ARGS", "")))
+CODEX_ARGS = _normalize_codex_args(
+    shlex.split(os.getenv("AGENT_SHIELD_CODEX_ARGS", ""))
+)
 
-INTERCEPT_MODE = os.getenv("AGENT_SHIELD_INTERCEPT_MODE", "process-tree").strip().lower()
+INTERCEPT_MODE = (
+    os.getenv("AGENT_SHIELD_INTERCEPT_MODE", "process-tree").strip().lower()
+)
 if INTERCEPT_MODE not in {"mcp-targets", "process-tree", "strict"}:
     INTERCEPT_MODE = "process-tree"
+
+DEFAULT_AGENT = (
+    os.getenv("AGENT_SHIELD_AGENT", "codex").strip().lower().replace("-", "_")
+)
+
+LOCAL_ONLY = os.getenv("AGENT_SHIELD_LOCAL_ONLY", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+VULN_SCAN_ENABLED = os.getenv("AGENT_SHIELD_VULN_SCAN", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+try:
+    LOCAL_DASHBOARD_PORT = int(os.getenv("AGENT_SHIELD_LOCAL_DASHBOARD_PORT", "3200"))
+except ValueError:
+    LOCAL_DASHBOARD_PORT = 3200
 
 try:
     PROCESS_SCAN_INTERVAL_SEC = float(
@@ -111,7 +175,7 @@ PROCESS_SCAN_INTERVAL_SEC = max(0.05, PROCESS_SCAN_INTERVAL_SEC)
 
 try:
     MAX_CONCURRENT_INTERCEPTS = int(
-        os.getenv("AGENT_SHIELD_MAX_CONCURRENT_INTERCEPTS", "1")
+        os.getenv("AGENT_SHIELD_MAX_CONCURRENT_INTERCEPTS", "4")
     )
 except ValueError:
     MAX_CONCURRENT_INTERCEPTS = 1
@@ -126,9 +190,7 @@ except ValueError:
 LOCAL_APPROVE_MAX_SCORE = max(0, min(100, LOCAL_APPROVE_MAX_SCORE))
 
 try:
-    LOCAL_DENY_MIN_SCORE = int(
-        os.getenv("AGENT_SHIELD_LOCAL_DENY_MIN_SCORE", "75")
-    )
+    LOCAL_DENY_MIN_SCORE = int(os.getenv("AGENT_SHIELD_LOCAL_DENY_MIN_SCORE", "75"))
 except ValueError:
     LOCAL_DENY_MIN_SCORE = 75
 LOCAL_DENY_MIN_SCORE = max(0, min(100, LOCAL_DENY_MIN_SCORE))
@@ -159,7 +221,10 @@ def _parse_csv_env(value: str) -> list[str]:
     return parts
 
 
-WHITELIST_HOSTS = [host.lower() for host in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_HOSTS", ""))]
+WHITELIST_HOSTS = [
+    host.lower()
+    for host in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_HOSTS", ""))
+]
 
 WHITELIST_PORTS = []
 for token in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_PORTS", "")):
@@ -172,7 +237,9 @@ for token in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_PORTS", "")):
 
 WHITELIST_COMMAND_PATTERNS = [
     pattern.lower()
-    for pattern in _parse_csv_env(os.getenv("AGENT_SHIELD_WHITELIST_COMMAND_PATTERNS", ""))
+    for pattern in _parse_csv_env(
+        os.getenv("AGENT_SHIELD_WHITELIST_COMMAND_PATTERNS", "")
+    )
 ]
 
 RESPONSES_API_HOSTS = [

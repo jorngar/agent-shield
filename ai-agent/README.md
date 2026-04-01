@@ -104,7 +104,7 @@ Direct examples:
 python3 cli.py
 python3 cli.py --backend http://localhost:3000
 python3 cli.py --backend http://localhost:3000 -- --help
-AGENT_SHIELD_BACKEND_URL=https://fmu6gbm7t8.execute-api.ap-northeast-1.amazonaws.compython3 cli.py
+AGENT_SHIELD_BACKEND_URL=https://fmu6gbm7t8.execute-api.ap-northeast-1.amazonaws.com python3 cli.py
 ```
 
 `npm` script wrappers:
